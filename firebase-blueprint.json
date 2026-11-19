@@ -1,0 +1,138 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Private authenticated user profile document.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name",
+          "maxLength": 120
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last sign-in timestamp"
+        }
+      },
+      "required": ["uid", "updatedAt"]
+    },
+    "FloorplanDocument": {
+      "title": "FloorplanDocument",
+      "description": "Saved 2D/3D spatial floorplan project owned by a specific user.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "projectName": {
+          "type": "string",
+          "description": "Floorplan project title",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "ceilingHeightCm": {
+          "type": "number",
+          "description": "Ceiling height in cm"
+        },
+        "wallThicknessCm": {
+          "type": "number",
+          "description": "Wall thickness in cm"
+        },
+        "unit": {
+          "type": "string",
+          "enum": ["cm", "m", "mm"],
+          "description": "Display unit"
+        },
+        "autoSnapAngles": {
+          "type": "boolean",
+          "description": "Auto-snap near orthogonal/diagonal wall angles"
+        },
+        "snapToleranceDeg": {
+          "type": "number",
+          "description": "Snap angle tolerance in degrees"
+        },
+        "forceClose": {
+          "type": "boolean",
+          "description": "Force close polygon via Bowditch distribution"
+        },
+        "analysisNotes": {
+          "type": "string",
+          "description": "Optional recognition or project notes",
+          "maxLength": 1000
+        },
+        "edges": {
+          "type": "array",
+          "description": "Ordered wall edges (max 60)"
+        },
+        "interiorWalls": {
+          "type": "array",
+          "description": "Optional interior partition walls (max 40)"
+        },
+        "elements": {
+          "type": "array",
+          "description": "Doors, windows, cabinets, and furniture elements (max 120)"
+        },
+        "sectionLines": {
+          "type": "array",
+          "description": "Optional architectural section lines for elevation views (max 20)"
+        },
+        "summary": {
+          "type": "object",
+          "description": "Precomputed display metrics (areaSqMeters, areaPing, edgeCount, elementCount)"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp"
+        }
+      },
+      "required": [
+        "ownerId",
+        "projectName",
+        "ceilingHeightCm",
+        "wallThicknessCm",
+        "unit",
+        "autoSnapAngles",
+        "snapToleranceDeg",
+        "forceClose",
+        "edges",
+        "elements",
+        "summary",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Private user profile metadata."
+    },
+    "/users/{userId}/floorplans/{planId}": {
+      "schema": {
+        "$ref": "#/entities/FloorplanDocument"
+      },
+      "description": "User-owned cloud-persisted floorplan projects."
+    }
+  }
+}
