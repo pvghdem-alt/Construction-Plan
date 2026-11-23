@@ -376,7 +376,7 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
 
         <div className="flex items-center justify-between text-xs text-slate-500">
           <a
-            href="/assets/aistudio/20261119_094437_bf0502ec.pdf"
+            href={`${import.meta.env.BASE_URL}assets/aistudio/20261119_094437_bf0502ec.pdf`}
             target="_blank"
             rel="noreferrer"
             className="underline decoration-slate-300 hover:text-slate-800"
