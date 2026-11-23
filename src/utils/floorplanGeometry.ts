@@ -100,16 +100,78 @@ export function rotateElementAngle(currentDeg: number | undefined, deltaDeg: num
   return Math.round(normalizeAngleDeg((currentDeg ?? 0) + deltaDeg) * 10) / 10;
 }
 
+export const ALL_DOOR_SWINGS: readonly DoorSwing[] = [
+  'inward-left',
+  'inward-right',
+  'outward-left',
+  'outward-right',
+  'sliding-inward-left',
+  'sliding-inward-right',
+  'sliding-outward-left',
+  'sliding-outward-right',
+] as const;
+
+export function parseDoorSwing(swing: DoorSwing | undefined): {
+  mode: 'swing' | 'sliding';
+  side: 'inward' | 'outward';
+  dir: 'left' | 'right';
+} {
+  const raw = swing || 'inward-right';
+  const isSliding = raw.startsWith('sliding-');
+  const core = isSliding ? raw.slice('sliding-'.length) : raw;
+  const side: 'inward' | 'outward' = core.startsWith('outward') ? 'outward' : 'inward';
+  const dir: 'left' | 'right' = core.endsWith('left') ? 'left' : 'right';
+  return {
+    mode: isSliding ? 'sliding' : 'swing',
+    side,
+    dir,
+  };
+}
+
+export function buildDoorSwing(
+  mode: 'swing' | 'sliding',
+  side: 'inward' | 'outward',
+  dir: 'left' | 'right'
+): DoorSwing {
+  return (mode === 'sliding' ? `sliding-${side}-${dir}` : `${side}-${dir}`) as DoorSwing;
+}
+
+export function getDoorSwingLabel(swing: DoorSwing | undefined): string {
+  const { mode, side, dir } = parseDoorSwing(swing);
+  if (mode === 'sliding') {
+    const sideText = side === 'inward' ? '內橫拉' : '外橫拉';
+    const dirText = dir === 'left' ? '往左' : '往右';
+    return `${sideText}·${dirText}`;
+  }
+  const sideText = side === 'inward' ? '內開' : '外開';
+  const dirText = dir === 'left' ? '左開' : '右開';
+  return `${sideText}·${dirText}`;
+}
+
 export function flipDoorSwing(
   swing: DoorSwing | undefined,
-  axis: 'hinge' | 'side'
+  axis: 'hinge' | 'side' | 'type'
 ): DoorSwing {
-  const current = swing || 'inward-right';
-  const [inOut, leftRight] = current.split('-') as ['inward' | 'outward', 'left' | 'right'];
+  const parsed = parseDoorSwing(swing);
   if (axis === 'hinge') {
-    return `${inOut}-${leftRight === 'right' ? 'left' : 'right'}` as DoorSwing;
+    return buildDoorSwing(
+      parsed.mode,
+      parsed.side,
+      parsed.dir === 'right' ? 'left' : 'right'
+    );
   }
-  return `${inOut === 'inward' ? 'outward' : 'inward'}-${leftRight}` as DoorSwing;
+  if (axis === 'side') {
+    return buildDoorSwing(
+      parsed.mode,
+      parsed.side === 'inward' ? 'outward' : 'inward',
+      parsed.dir
+    );
+  }
+  return buildDoorSwing(
+    parsed.mode === 'sliding' ? 'swing' : 'sliding',
+    parsed.side,
+    parsed.dir
+  );
 }
 
 export function snapAngleDeg(
@@ -1026,7 +1088,7 @@ export function createPresetSectionLine(
       startYCm: Math.round(minY - pad),
       endXCm: Math.round(centerX),
       endYCm: Math.round(maxY + pad),
-      viewDirection: -1,
+      viewDirection: 1,
     };
   }
   // Cut vertically top -> bottom, look LEFT (-X)
@@ -1037,7 +1099,7 @@ export function createPresetSectionLine(
     startYCm: Math.round(minY - pad),
     endXCm: Math.round(centerX),
     endYCm: Math.round(maxY + pad),
-    viewDirection: 1,
+    viewDirection: -1,
   };
 }
 
@@ -1220,10 +1282,33 @@ export function computeSectionElevation(
       const projW = opMax - opMin;
       if (projW < 6) continue;
 
+      let slideSignInView: 1 | -1 | undefined;
+      if (el.kind === 'door') {
+        const parsedDoor = parseDoorSwing(el.swingDirection);
+        const targetVec =
+          parsedDoor.mode === 'sliding'
+            ? {
+                x: pl.tangent.x * (parsedDoor.dir === 'right' ? 1 : -1),
+                y: pl.tangent.y * (parsedDoor.dir === 'right' ? 1 : -1),
+              }
+            : {
+                x: pl.tangent.x * (parsedDoor.dir === 'right' ? -1 : 1),
+                y: pl.tangent.y * (parsedDoor.dir === 'right' ? -1 : 1),
+              };
+        const dotS = targetVec.x * rightAxis.x + targetVec.y * rightAxis.y;
+        slideSignInView = dotS >= 0 ? 1 : -1;
+      }
+
       openings.push({
         elementId: el.id,
         kind: el.kind,
         name: el.name,
+        ...(el.kind === 'door'
+          ? {
+              swingDirection: el.swingDirection || 'inward-right',
+              slideSignInView,
+            }
+          : {}),
         sStartCm: opMin,
         sEndCm: opMax,
         projectedWidthCm: projW,

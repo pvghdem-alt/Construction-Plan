@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  ALL_DOOR_SWINGS,
   applyAutoCloseToProject,
+  buildDoorSwing,
   computeElementWallClearances,
   computeSectionElevation,
   computeWallSurfaceAreas,
@@ -9,11 +11,22 @@ import {
   duplicateElementForPaste,
   flipDoorSwing,
   formatDimension,
+  getDoorSwingLabel,
+  parseDoorSwing,
   resolveElementPlacements,
   rotateElementAngle,
   snapAngleDeg,
   solveFloorplan,
 } from './floorplanGeometry';
+import {
+  buildGitHubPagesShareUrl,
+  decodeShareToken,
+  decodeShareTokenSync,
+  encodeShareToken,
+  encodeShareTokenSync,
+  extractShareTokenFromLocation,
+  sanitizeSharedProject,
+} from './shareLink';
 import {
   commitBaselineToHistory,
   createHistory,
@@ -279,6 +292,65 @@ test('computeSectionElevation projects windows, doors, and walls accurately in v
   const elevSouth = computeSectionElevation(ROOM_IN_ROOM_PRESET, solved, placements, secSouth);
   const southWindowNames = elevSouth.openings.map((o) => o.name);
   assert.ok(!southWindowNames.some((n) => n.includes('對外大窗')));
+
+  const secWest = createPresetSectionLine(solved, 'west', []);
+  const secEast = createPresetSectionLine(solved, 'east', []);
+  const elevWest = computeSectionElevation(ROOM_IN_ROOM_PRESET, solved, placements, secWest);
+  const elevEast = computeSectionElevation(ROOM_IN_ROOM_PRESET, solved, placements, secEast);
+  assert.ok(elevWest.openings.some((o) => o.name.includes('入口門')) || elevWest.walls.length > 0);
+  assert.ok(elevEast.walls.length > 0);
+  assert.equal(secWest.viewDirection, -1);
+  assert.equal(secEast.viewDirection, 1);
 });
+
+test('8-variant DoorSwing helpers support swing and sliding doors across hinge, side, and type axes', () => {
+  assert.equal(ALL_DOOR_SWINGS.length, 8);
+  assert.deepEqual(parseDoorSwing('sliding-outward-left'), {
+    mode: 'sliding',
+    side: 'outward',
+    dir: 'left',
+  });
+  assert.equal(buildDoorSwing('sliding', 'inward', 'right'), 'sliding-inward-right');
+  assert.equal(getDoorSwingLabel('inward-left'), '內開·左開');
+  assert.equal(getDoorSwingLabel('sliding-outward-right'), '外橫拉·往右');
+
+  assert.equal(flipDoorSwing('inward-right', 'type'), 'sliding-inward-right');
+  assert.equal(flipDoorSwing('sliding-inward-right', 'side'), 'sliding-outward-right');
+  assert.equal(flipDoorSwing('sliding-outward-right', 'hinge'), 'sliding-outward-left');
+  assert.equal(flipDoorSwing('sliding-outward-left', 'type'), 'outward-left');
+});
+
+test('shareLink encodes, compresses, extracts, and sanitizes read-only floorplan URLs', async () => {
+  const modifiedProject = {
+    ...ROOM_IN_ROOM_PRESET,
+    elements: ROOM_IN_ROOM_PRESET.elements.map((el) =>
+      el.kind === 'door' ? { ...el, swingDirection: 'sliding-outward-left' as const } : el
+    ),
+  };
+
+  const syncToken = encodeShareTokenSync(modifiedProject);
+  assert.ok(syncToken.startsWith('u:'));
+  const syncDecoded = decodeShareTokenSync(syncToken);
+  assert.ok(syncDecoded);
+  assert.equal(syncDecoded.projectName, modifiedProject.projectName);
+  const syncDoor = syncDecoded.elements.find((el) => el.kind === 'door');
+  assert.equal(syncDoor?.swingDirection, 'sliding-outward-left');
+
+  const asyncToken = await encodeShareToken(modifiedProject);
+  assert.ok(asyncToken.startsWith('z:'));
+  assert.ok(asyncToken.length < syncToken.length);
+  const asyncDecoded = await decodeShareToken(asyncToken);
+  assert.ok(asyncDecoded);
+  assert.equal(asyncDecoded.edges.length, modifiedProject.edges.length);
+
+  const shareUrl = buildGitHubPagesShareUrl('https://example.github.io/floorplan-app/', asyncToken);
+  const parsedUrl = new URL(shareUrl);
+  const extracted = extractShareTokenFromLocation(parsedUrl.hash, parsedUrl.search);
+  assert.equal(extracted, asyncToken);
+
+  assert.equal(sanitizeSharedProject(null), null);
+  assert.equal(sanitizeSharedProject({ edges: [{ lengthCm: 100, angleDeg: 0 }] }), null);
+});
+
 
 

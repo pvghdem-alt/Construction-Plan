@@ -6,7 +6,15 @@ export type ElementPlacementMode = 'wall' | 'free';
 
 export type ElementSide = 'inside' | 'outside';
 
-export type DoorSwing = 'inward-left' | 'inward-right' | 'outward-left' | 'outward-right';
+export type DoorSwing =
+  | 'inward-left'
+  | 'inward-right'
+  | 'outward-left'
+  | 'outward-right'
+  | 'sliding-inward-left'
+  | 'sliding-inward-right'
+  | 'sliding-outward-left'
+  | 'sliding-outward-right';
 
 export type ViewMode = '2d' | '3d' | 'split' | 'elevation';
 
@@ -255,6 +263,9 @@ export interface ElevationOpeningItem {
   elementId: string;
   kind: 'door' | 'window';
   name: string;
+  swingDirection?: DoorSwing;
+  /** +1 slides toward +S (screen right), -1 slides toward -S (screen left) in elevation view */
+  slideSignInView?: 1 | -1;
   sStartCm: number;
   sEndCm: number;
   projectedWidthCm: number;

@@ -12,6 +12,8 @@ import {
   Calculator,
   Scissors,
   FileDown,
+  Share2,
+  Lock,
 } from 'lucide-react';
 import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
 import { auth, googleProvider } from './firebase';
@@ -30,6 +32,8 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { Floorplan2DCanvas, type Floorplan2DHandle } from './components/Floorplan2DCanvas';
 import { Floorplan3DCanvas, type Floorplan3DHandle } from './components/Floorplan3DCanvas';
 import { ParameterSidebar } from './components/ParameterSidebar';
+import { ReadOnlySummarySidebar } from './components/ReadOnlySummarySidebar';
+import { ShareModal } from './components/ShareModal';
 import { WallAreaModal } from './components/WallAreaModal';
 import type { FloorplanElement, FloorplanProject, SectionLine, ViewMode } from './types/floorplan';
 import {
@@ -57,10 +61,35 @@ import {
   L_STUDIO_PRESET,
   ROOM_IN_ROOM_PRESET,
 } from './utils/samplePresets';
+import {
+  decodeShareToken,
+  decodeShareTokenSync,
+  extractShareTokenFromLocation,
+} from './utils/shareLink';
+
+function resolveInitialSharedState(): {
+  project: FloorplanProject;
+  isReadOnly: boolean;
+} {
+  if (typeof window !== 'undefined') {
+    const token = extractShareTokenFromLocation(window.location.hash, window.location.search);
+    if (token) {
+      const syncDecoded = decodeShareTokenSync(token);
+      if (syncDecoded) {
+        return { project: syncDecoded, isReadOnly: true };
+      }
+      return { project: ATTACHED_SKETCH_PRESET, isReadOnly: true };
+    }
+  }
+  return { project: ATTACHED_SKETCH_PRESET, isReadOnly: false };
+}
 
 export default function App() {
+  const initialShared = useMemo(() => resolveInitialSharedState(), []);
+  const [isReadOnly, setIsReadOnly] = useState<boolean>(initialShared.isReadOnly);
+  const [shareModalOpen, setShareModalOpen] = useState(false);
   const [history, setHistory] = useState<HistoryState<FloorplanProject>>(() =>
-    createHistory(ATTACHED_SKETCH_PRESET)
+    createHistory(initialShared.project)
   );
   const project = history.present;
   const canUndo = history.past.length > 0;
@@ -117,7 +146,9 @@ export default function App() {
   const [mobilePanel, setMobilePanel] = useState<'editor' | 'canvas'>('canvas');
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [selectedElementId, setSelectedElementId] = useState<string | null>(null);
-  const [selectedSectionId, setSelectedSectionId] = useState<string | null>(null);
+  const [selectedSectionId, setSelectedSectionId] = useState<string | null>(
+    () => initialShared.project.sectionLines?.[0]?.id ?? null
+  );
   const [sectionDrawMode, setSectionDrawMode] = useState(false);
   const [showDimensions3D, setShowDimensions3D] = useState(true);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
@@ -161,6 +192,44 @@ export default function App() {
       }
     };
   }, []);
+
+  // Load compressed (#share=z:...) or updated share tokens on mount and hashchange
+  useEffect(() => {
+    let active = true;
+    const applyFromLocation = async () => {
+      const token = extractShareTokenFromLocation(window.location.hash, window.location.search);
+      if (!token) {
+        setIsReadOnly(false);
+        return;
+      }
+      const decoded = await decodeShareToken(token);
+      if (!active) return;
+      if (decoded) {
+        setIsReadOnly(true);
+        setShareModalOpen(false);
+        setCloudModalOpen(false);
+        setEditingElementId(null);
+        setSectionDrawMode(false);
+        setSelectedEdgeId(null);
+        setSelectedElementId(null);
+        setSelectedSectionId(decoded.sectionLines?.[0]?.id ?? null);
+        setHistory(createHistory(decoded));
+      } else {
+        setIsReadOnly(false);
+        showToast('分享連結無效或已損毀，已切換回一般編輯模式');
+      }
+    };
+
+    void applyFromLocation();
+    const onHashChange = () => {
+      void applyFromLocation();
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => {
+      active = false;
+      window.removeEventListener('hashchange', onHashChange);
+    };
+  }, [showToast]);
 
   const solved = useMemo(() => solveFloorplan(project), [project]);
   const placements = useMemo(
@@ -333,7 +402,8 @@ export default function App() {
   );
 
   const handleFlipDoor = useCallback(
-    (elementId: string, axis: 'hinge' | 'side') => {
+    (elementId: string, axis: 'hinge' | 'side' | 'type') => {
+      if (isReadOnly) return;
       setProject((prev) => ({
         ...prev,
         elements: prev.elements.map((el) =>
@@ -343,7 +413,7 @@ export default function App() {
         ),
       }));
     },
-    [setProject]
+    [isReadOnly, setProject]
   );
 
   const handleDeleteElement = useCallback(
@@ -511,7 +581,13 @@ export default function App() {
   // Global keyboard shortcuts: Escape, Ctrl/Cmd+C, Ctrl/Cmd+V, Delete, Ctrl/Cmd+Z undo, Ctrl/Cmd+Y redo
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (cloudModalOpen || wallAreaModalOpen || editingElementId !== null) {
+      if (
+        isReadOnly ||
+        shareModalOpen ||
+        cloudModalOpen ||
+        wallAreaModalOpen ||
+        editingElementId !== null
+      ) {
         return;
       }
       const target = e.target as HTMLElement | null;
@@ -596,6 +672,8 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
+    isReadOnly,
+    shareModalOpen,
     cloudModalOpen,
     wallAreaModalOpen,
     editingElementId,
@@ -657,6 +735,7 @@ export default function App() {
       <div
         className="h-screen w-full flex flex-col bg-slate-50 text-slate-900 overflow-hidden"
         data-view-mode={viewMode}
+        data-readonly={isReadOnly ? 'true' : 'false'}
       >
         {/* Top Bar Contract: Single-row 3-zone header */}
         <header className="h-14 shrink-0 bg-white border-b border-slate-200 px-4 lg:px-6 flex items-center justify-between gap-4">
@@ -664,6 +743,15 @@ export default function App() {
             <h1 className="text-base lg:text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0">
               圖稿空間轉換器
             </h1>
+            {isReadOnly && (
+              <span
+                data-testid="readonly-badge"
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200 whitespace-nowrap shrink-0"
+              >
+                <Lock className="w-3 h-3 text-amber-700" />
+                <span>唯讀檢視（僅供瀏覽）</span>
+              </span>
+            )}
           </div>
 
           {/* Clean Unboxed Space Metrics (Zero Pills) */}
@@ -690,14 +778,29 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={() => setCloudModalOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 transition-colors whitespace-nowrap shrink-0"
-            >
-              <Cloud className="w-3.5 h-3.5" />
-              <span>{user ? `雲端專案 (${cloudRecords.length})` : '雲端儲存 / 讀取'}</span>
-            </button>
+            {!isReadOnly && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setShareModalOpen(true)}
+                  aria-label="分享唯讀連結"
+                  title="產生 GitHub Pages 第三方唯讀檢視連結"
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Share2 className="w-3.5 h-3.5" />
+                  <span>分享連結</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setCloudModalOpen(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Cloud className="w-3.5 h-3.5" />
+                  <span>{user ? `雲端專案 (${cloudRecords.length})` : '雲端儲存 / 讀取'}</span>
+                </button>
+              </>
+            )}
 
             <button
               type="button"
@@ -741,7 +844,7 @@ export default function App() {
           }`}
         >
           <SlidersHorizontal className="w-3.5 h-3.5" />
-          <span>草圖與參數編輯</span>
+          <span>{isReadOnly ? '空間資訊總覽' : '草圖與參數編輯'}</span>
         </button>
         <button
           type="button"
@@ -759,27 +862,40 @@ export default function App() {
 
       {/* Main Split Workspace */}
       <div className="flex-1 min-h-0 flex flex-col lg:flex-row">
-        {/* Left Sidebar: Upload, Settings & Editable Lists */}
+        {/* Left Sidebar: Editable Parameter Panel or Read-Only Summary */}
         <div
           className={`${
             mobilePanel === 'editor' ? 'flex' : 'hidden'
           } lg:flex flex-1 lg:flex-none min-h-0`}
         >
-          <ParameterSidebar
-            project={project}
-            solved={solved}
-            selectedEdgeId={selectedEdgeId}
-            selectedElementId={selectedElementId}
-            onSelectEdge={setSelectedEdgeId}
-            onSelectElement={setSelectedElementId}
-            onUpdateProject={setProject}
-            onAutoClose={handleAutoClose}
-            onLoadPreset={handleLoadPreset}
-            onAnalyzeUpload={handleAnalyzeUpload}
-            onAnalyzeSamplePdf={handleAnalyzeSamplePdf}
-            isAnalyzing={isAnalyzing}
-            analyzeError={analyzeError}
-          />
+          {isReadOnly ? (
+            <ReadOnlySummarySidebar
+              project={project}
+              solved={solved}
+              selectedEdgeId={selectedEdgeId}
+              selectedElementId={selectedElementId}
+              selectedSectionId={selectedSectionId}
+              onSelectEdge={setSelectedEdgeId}
+              onSelectElement={setSelectedElementId}
+              onViewSection={handleViewSectionElevation}
+            />
+          ) : (
+            <ParameterSidebar
+              project={project}
+              solved={solved}
+              selectedEdgeId={selectedEdgeId}
+              selectedElementId={selectedElementId}
+              onSelectEdge={setSelectedEdgeId}
+              onSelectElement={setSelectedElementId}
+              onUpdateProject={setProject}
+              onAutoClose={handleAutoClose}
+              onLoadPreset={handleLoadPreset}
+              onAnalyzeUpload={handleAnalyzeUpload}
+              onAnalyzeSamplePdf={handleAnalyzeSamplePdf}
+              isAnalyzing={isAnalyzing}
+              analyzeError={analyzeError}
+            />
+          )}
         </div>
 
         {/* Right Workspace: Toolbar + 2D / 3D Interactive Canvas */}
@@ -860,30 +976,32 @@ export default function App() {
               </div>
 
               {/* Undo / Redo History Controls */}
-              <div className="flex items-center gap-1 pl-1 border-l border-slate-200">
-                <button
-                  type="button"
-                  disabled={!canUndo}
-                  onClick={handleUndo}
-                  aria-label="復原上一步"
-                  title="復原上一步 (Ctrl+Z)"
-                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0"
-                >
-                  <Undo2 className="w-3.5 h-3.5" />
-                  <span className="hidden md:inline">上一步</span>
-                </button>
-                <button
-                  type="button"
-                  disabled={!canRedo}
-                  onClick={handleRedo}
-                  aria-label="重做下一步"
-                  title="重做下一步 (Ctrl+Y / Ctrl+Shift+Z)"
-                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0"
-                >
-                  <Redo2 className="w-3.5 h-3.5" />
-                  <span className="hidden md:inline">下一步</span>
-                </button>
-              </div>
+              {!isReadOnly && (
+                <div className="flex items-center gap-1 pl-1 border-l border-slate-200">
+                  <button
+                    type="button"
+                    disabled={!canUndo}
+                    onClick={handleUndo}
+                    aria-label="復原上一步"
+                    title="復原上一步 (Ctrl+Z)"
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0"
+                  >
+                    <Undo2 className="w-3.5 h-3.5" />
+                    <span className="hidden md:inline">上一步</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!canRedo}
+                    onClick={handleRedo}
+                    aria-label="重做下一步"
+                    title="重做下一步 (Ctrl+Y / Ctrl+Shift+Z)"
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap shrink-0"
+                  >
+                    <Redo2 className="w-3.5 h-3.5" />
+                    <span className="hidden md:inline">下一步</span>
+                  </button>
+                </div>
+              )}
             </div>
 
             <div className="flex items-center gap-2 text-xs text-slate-600 shrink-0">
@@ -926,24 +1044,25 @@ export default function App() {
                 selectedEdgeId={selectedEdgeId}
                 selectedElementId={selectedElementId}
                 selectedSectionId={selectedSectionId}
-                sectionDrawMode={sectionDrawMode}
-                onSetSectionDrawMode={setSectionDrawMode}
+                sectionDrawMode={isReadOnly ? false : sectionDrawMode}
+                readOnly={isReadOnly}
+                onSetSectionDrawMode={isReadOnly ? undefined : setSectionDrawMode}
                 onSelectEdge={setSelectedEdgeId}
                 onSelectElement={setSelectedElementId}
                 onSelectSection={setSelectedSectionId}
-                onMoveElement={handleMoveElement}
-                onRotateElement={handleRotateElement}
-                onFlipDoor={handleFlipDoor}
-                onBeginElementInteraction={handleBeginElementInteraction}
-                onEndElementInteraction={handleEndElementInteraction}
-                onDoubleClickElement={setEditingElementId}
-                onDeleteElement={handleDeleteElement}
-                onToggleWallDistances={handleToggleWallDistances}
-                onCopyElement={handleCopyElement}
-                onCreateSectionLine={handleCreateSectionLine}
-                onUpdateSectionLine={handleUpdateSectionLine}
-                onFlipSectionDirection={handleFlipSectionDirection}
-                onDeleteSectionLine={handleDeleteSectionLine}
+                onMoveElement={isReadOnly ? undefined : handleMoveElement}
+                onRotateElement={isReadOnly ? undefined : handleRotateElement}
+                onFlipDoor={isReadOnly ? undefined : handleFlipDoor}
+                onBeginElementInteraction={isReadOnly ? undefined : handleBeginElementInteraction}
+                onEndElementInteraction={isReadOnly ? undefined : handleEndElementInteraction}
+                onDoubleClickElement={isReadOnly ? undefined : setEditingElementId}
+                onDeleteElement={isReadOnly ? undefined : handleDeleteElement}
+                onToggleWallDistances={isReadOnly ? undefined : handleToggleWallDistances}
+                onCopyElement={isReadOnly ? undefined : handleCopyElement}
+                onCreateSectionLine={isReadOnly ? undefined : handleCreateSectionLine}
+                onUpdateSectionLine={isReadOnly ? undefined : handleUpdateSectionLine}
+                onFlipSectionDirection={isReadOnly ? undefined : handleFlipSectionDirection}
+                onDeleteSectionLine={isReadOnly ? undefined : handleDeleteSectionLine}
                 onViewSectionElevation={handleViewSectionElevation}
               />
             )}
@@ -972,24 +1091,25 @@ export default function App() {
                     selectedEdgeId={selectedEdgeId}
                     selectedElementId={selectedElementId}
                     selectedSectionId={selectedSectionId}
-                    sectionDrawMode={sectionDrawMode}
-                    onSetSectionDrawMode={setSectionDrawMode}
+                    sectionDrawMode={isReadOnly ? false : sectionDrawMode}
+                    readOnly={isReadOnly}
+                    onSetSectionDrawMode={isReadOnly ? undefined : setSectionDrawMode}
                     onSelectEdge={setSelectedEdgeId}
                     onSelectElement={setSelectedElementId}
                     onSelectSection={setSelectedSectionId}
-                    onMoveElement={handleMoveElement}
-                    onRotateElement={handleRotateElement}
-                    onFlipDoor={handleFlipDoor}
-                    onBeginElementInteraction={handleBeginElementInteraction}
-                    onEndElementInteraction={handleEndElementInteraction}
-                    onDoubleClickElement={setEditingElementId}
-                    onDeleteElement={handleDeleteElement}
-                    onToggleWallDistances={handleToggleWallDistances}
-                    onCopyElement={handleCopyElement}
-                    onCreateSectionLine={handleCreateSectionLine}
-                    onUpdateSectionLine={handleUpdateSectionLine}
-                    onFlipSectionDirection={handleFlipSectionDirection}
-                    onDeleteSectionLine={handleDeleteSectionLine}
+                    onMoveElement={isReadOnly ? undefined : handleMoveElement}
+                    onRotateElement={isReadOnly ? undefined : handleRotateElement}
+                    onFlipDoor={isReadOnly ? undefined : handleFlipDoor}
+                    onBeginElementInteraction={isReadOnly ? undefined : handleBeginElementInteraction}
+                    onEndElementInteraction={isReadOnly ? undefined : handleEndElementInteraction}
+                    onDoubleClickElement={isReadOnly ? undefined : setEditingElementId}
+                    onDeleteElement={isReadOnly ? undefined : handleDeleteElement}
+                    onToggleWallDistances={isReadOnly ? undefined : handleToggleWallDistances}
+                    onCopyElement={isReadOnly ? undefined : handleCopyElement}
+                    onCreateSectionLine={isReadOnly ? undefined : handleCreateSectionLine}
+                    onUpdateSectionLine={isReadOnly ? undefined : handleUpdateSectionLine}
+                    onFlipSectionDirection={isReadOnly ? undefined : handleFlipSectionDirection}
+                    onDeleteSectionLine={isReadOnly ? undefined : handleDeleteSectionLine}
                     onViewSectionElevation={handleViewSectionElevation}
                   />
                 </div>
@@ -1015,15 +1135,20 @@ export default function App() {
                 placements={placements}
                 selectedSectionId={selectedSectionId}
                 selectedElementId={selectedElementId}
+                readOnly={isReadOnly}
                 onSelectSection={setSelectedSectionId}
                 onSelectElement={setSelectedElementId}
-                onAddSectionLine={handleCreateSectionLine}
-                onFlipSectionDirection={handleFlipSectionDirection}
-                onDeleteSectionLine={handleDeleteSectionLine}
-                onSwitchToDraw2D={() => {
-                  setViewMode('2d');
-                  setSectionDrawMode(true);
-                }}
+                onAddSectionLine={isReadOnly ? undefined : handleCreateSectionLine}
+                onFlipSectionDirection={isReadOnly ? undefined : handleFlipSectionDirection}
+                onDeleteSectionLine={isReadOnly ? undefined : handleDeleteSectionLine}
+                onSwitchToDraw2D={
+                  isReadOnly
+                    ? undefined
+                    : () => {
+                        setViewMode('2d');
+                        setSectionDrawMode(true);
+                      }
+                }
               />
             )}
 
@@ -1041,32 +1166,42 @@ export default function App() {
         </main>
       </div>
 
-      <CloudStorageModal
-        isOpen={cloudModalOpen}
-        onClose={() => setCloudModalOpen(false)}
-        user={user}
-        authReady={authReady}
-        onSignIn={handleSignIn}
-        onSignOut={handleSignOut}
-        currentProject={project}
-        currentSolved={solved}
-        activeCloudId={activeCloudId}
-        records={cloudRecords}
-        isLoadingRecords={isLoadingCloud}
-        cloudError={cloudError}
-        onSaveNew={handleSaveNewCloud}
-        onUpdateExisting={handleUpdateCloud}
-        onLoadRecord={handleLoadCloudRecord}
-        onDeleteRecord={handleDeleteCloudRecord}
-      />
+      {!isReadOnly && (
+        <>
+          <ShareModal
+            isOpen={shareModalOpen}
+            onClose={() => setShareModalOpen(false)}
+            project={project}
+          />
 
-      <ElementDimensionsModal
-        element={editingElement}
-        unit={project.unit}
-        onClose={() => setEditingElementId(null)}
-        onSave={handleUpdateElement}
-        onDelete={handleDeleteElement}
-      />
+          <CloudStorageModal
+            isOpen={cloudModalOpen}
+            onClose={() => setCloudModalOpen(false)}
+            user={user}
+            authReady={authReady}
+            onSignIn={handleSignIn}
+            onSignOut={handleSignOut}
+            currentProject={project}
+            currentSolved={solved}
+            activeCloudId={activeCloudId}
+            records={cloudRecords}
+            isLoadingRecords={isLoadingCloud}
+            cloudError={cloudError}
+            onSaveNew={handleSaveNewCloud}
+            onUpdateExisting={handleUpdateCloud}
+            onLoadRecord={handleLoadCloudRecord}
+            onDeleteRecord={handleDeleteCloudRecord}
+          />
+
+          <ElementDimensionsModal
+            element={editingElement}
+            unit={project.unit}
+            onClose={() => setEditingElementId(null)}
+            onSave={handleUpdateElement}
+            onDelete={handleDeleteElement}
+          />
+        </>
+      )}
 
       <WallAreaModal
         isOpen={wallAreaModalOpen}

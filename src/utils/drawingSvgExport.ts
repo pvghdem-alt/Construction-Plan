@@ -11,6 +11,7 @@ import {
   computeSectionElevation,
   formatDimension,
   getSectionBasis,
+  parseDoorSwing,
 } from './floorplanGeometry';
 
 function escXml(str: string): string {
@@ -137,31 +138,94 @@ export function buildFloorplan2DSvgString(
         `<text x="${center.x + pl.edge.inwardNormal.x * 18 * s}" y="${center.y + pl.edge.inwardNormal.y * 18 * s}" text-anchor="middle" dominant-baseline="central" fill="#0369a1" font-size="${9 * s}" font-weight="600">${escXml(element.name)} (${formatDimension(pl.clampedWidthCm, project.unit, false)})</text>`
       );
     } else if (element.kind === 'door' && pl.edge) {
-      const swing = element.swingDirection || 'inward-right';
-      const isOutward = swing.startsWith('outward');
-      const isHingeEnd = swing.endsWith('right');
-      const swingNormal = isOutward ? pl.outwardNormal : pl.inwardNormal;
-      const hinge = isHingeEnd ? endPoint : startPoint;
-      const latch = isHingeEnd ? startPoint : endPoint;
-      const leafTip: Point2D = {
-        x: hinge.x + swingNormal.x * pl.clampedWidthCm,
-        y: hinge.y + swingNormal.y * pl.clampedWidthCm,
-      };
-      const cross = (latch.x - hinge.x) * (leafTip.y - hinge.y) - (latch.y - hinge.y) * (leafTip.x - hinge.x);
-      const sweepFlag = cross >= 0 ? 1 : 0;
+      const { mode: doorMode, side: doorSide, dir: doorDir } = parseDoorSwing(
+        element.swingDirection
+      );
+      const swingNormal = doorSide === 'outward' ? pl.outwardNormal : pl.inwardNormal;
 
       parts.push(
         `<line x1="${startPoint.x}" y1="${startPoint.y}" x2="${endPoint.x}" y2="${endPoint.y}" stroke="#f8fafc" stroke-width="${wallStroke + 2}" />`
       );
-      parts.push(
-        `<line x1="${hinge.x}" y1="${hinge.y}" x2="${leafTip.x}" y2="${leafTip.y}" stroke="#0f172a" stroke-width="${3.2 * s}" stroke-linecap="round" />`
-      );
-      parts.push(
-        `<path d="M ${latch.x} ${latch.y} A ${pl.clampedWidthCm} ${pl.clampedWidthCm} 0 0 ${sweepFlag} ${leafTip.x} ${leafTip.y}" fill="rgba(37,99,235,0.06)" stroke="#2563eb" stroke-width="${1.4 * s}" stroke-dasharray="${5 * s} ${4 * s}" />`
-      );
-      parts.push(
-        `<text x="${center.x + swingNormal.x * Math.min(44 * s, pl.clampedWidthCm * 0.45)}" y="${center.y + swingNormal.y * Math.min(44 * s, pl.clampedWidthCm * 0.45)}" text-anchor="middle" dominant-baseline="central" fill="#1e40af" font-size="${9.5 * s}" font-weight="600">${escXml(element.name)}</text>`
-      );
+
+      if (doorMode === 'sliding') {
+        const slideDirVec: Point2D =
+          doorDir === 'right' ? tangent : { x: -tangent.x, y: -tangent.y };
+        const trackOff = wallStroke * 0.65 + 4 * s;
+        const railStartAnchor = doorDir === 'right' ? startPoint : endPoint;
+        const railOpenEnd = doorDir === 'right' ? endPoint : startPoint;
+        const railStart: Point2D = {
+          x: railStartAnchor.x + swingNormal.x * trackOff,
+          y: railStartAnchor.y + swingNormal.y * trackOff,
+        };
+        const railEnd: Point2D = {
+          x: railOpenEnd.x + slideDirVec.x * (pl.clampedWidthCm * 0.72) + swingNormal.x * trackOff,
+          y: railOpenEnd.y + slideDirVec.y * (pl.clampedWidthCm * 0.72) + swingNormal.y * trackOff,
+        };
+        const shiftDist = pl.clampedWidthCm * 0.55;
+        const leafStart: Point2D = {
+          x: startPoint.x + slideDirVec.x * shiftDist + swingNormal.x * trackOff,
+          y: startPoint.y + slideDirVec.y * shiftDist + swingNormal.y * trackOff,
+        };
+        const leafEnd: Point2D = {
+          x: endPoint.x + slideDirVec.x * shiftDist + swingNormal.x * trackOff,
+          y: endPoint.y + slideDirVec.y * shiftDist + swingNormal.y * trackOff,
+        };
+        const arrowOff = trackOff + 10 * s;
+        const arrA: Point2D = {
+          x: center.x - slideDirVec.x * (pl.clampedWidthCm * 0.25) + swingNormal.x * arrowOff,
+          y: center.y - slideDirVec.y * (pl.clampedWidthCm * 0.25) + swingNormal.y * arrowOff,
+        };
+        const arrB: Point2D = {
+          x: center.x + slideDirVec.x * (pl.clampedWidthCm * 0.25) + swingNormal.x * arrowOff,
+          y: center.y + slideDirVec.y * (pl.clampedWidthCm * 0.25) + swingNormal.y * arrowOff,
+        };
+        const headL: Point2D = {
+          x: arrB.x - slideDirVec.x * 7 * s + swingNormal.x * 4 * s,
+          y: arrB.y - slideDirVec.y * 7 * s + swingNormal.y * 4 * s,
+        };
+        const headR: Point2D = {
+          x: arrB.x - slideDirVec.x * 7 * s - swingNormal.x * 4 * s,
+          y: arrB.y - slideDirVec.y * 7 * s - swingNormal.y * 4 * s,
+        };
+
+        parts.push(
+          `<line x1="${railStart.x}" y1="${railStart.y}" x2="${railEnd.x}" y2="${railEnd.y}" stroke="#64748b" stroke-width="${1.5 * s}" stroke-dasharray="${4 * s} ${3 * s}" />`
+        );
+        parts.push(
+          `<line x1="${leafStart.x}" y1="${leafStart.y}" x2="${leafEnd.x}" y2="${leafEnd.y}" stroke="#0f172a" stroke-width="${4.2 * s}" stroke-linecap="square" />`
+        );
+        parts.push(
+          `<line x1="${arrA.x}" y1="${arrA.y}" x2="${arrB.x}" y2="${arrB.y}" stroke="#2563eb" stroke-width="${1.5 * s}" />`
+        );
+        parts.push(
+          `<polygon points="${arrB.x},${arrB.y} ${headL.x},${headL.y} ${headR.x},${headR.y}" fill="#2563eb" />`
+        );
+        parts.push(
+          `<text x="${center.x + swingNormal.x * (arrowOff + 13 * s)}" y="${center.y + swingNormal.y * (arrowOff + 13 * s)}" text-anchor="middle" dominant-baseline="central" fill="#1e40af" font-size="${9.5 * s}" font-weight="600">${escXml(element.name)} (${doorSide === 'inward' ? '內橫拉' : '外橫拉'})</text>`
+        );
+      } else {
+        const isHingeEnd = doorDir === 'right';
+        const hinge = isHingeEnd ? endPoint : startPoint;
+        const latch = isHingeEnd ? startPoint : endPoint;
+        const leafTip: Point2D = {
+          x: hinge.x + swingNormal.x * pl.clampedWidthCm,
+          y: hinge.y + swingNormal.y * pl.clampedWidthCm,
+        };
+        const cross =
+          (latch.x - hinge.x) * (leafTip.y - hinge.y) -
+          (latch.y - hinge.y) * (leafTip.x - hinge.x);
+        const sweepFlag = cross >= 0 ? 1 : 0;
+
+        parts.push(
+          `<line x1="${hinge.x}" y1="${hinge.y}" x2="${leafTip.x}" y2="${leafTip.y}" stroke="#0f172a" stroke-width="${3.2 * s}" stroke-linecap="round" />`
+        );
+        parts.push(
+          `<path d="M ${latch.x} ${latch.y} A ${pl.clampedWidthCm} ${pl.clampedWidthCm} 0 0 ${sweepFlag} ${leafTip.x} ${leafTip.y}" fill="rgba(37,99,235,0.06)" stroke="#2563eb" stroke-width="${1.4 * s}" stroke-dasharray="${5 * s} ${4 * s}" />`
+        );
+        parts.push(
+          `<text x="${center.x + swingNormal.x * Math.min(44 * s, pl.clampedWidthCm * 0.45)}" y="${center.y + swingNormal.y * Math.min(44 * s, pl.clampedWidthCm * 0.45)}" text-anchor="middle" dominant-baseline="central" fill="#1e40af" font-size="${9.5 * s}" font-weight="600">${escXml(element.name)}</text>`
+        );
+      }
     }
 
     // 4-side wall clearance rays if enabled on element
@@ -335,6 +399,7 @@ export function buildElevationSvgString(
         `<line x1="${midX}" y1="${yTop + inset}" x2="${midX}" y2="${yTop + op.heightCm - inset}" stroke="#0369a1" stroke-width="${1.2 * s}" />`
       );
     } else {
+      const parsedDoor = parseDoorSwing(op.swingDirection);
       parts.push(
         `<rect x="${op.sStartCm}" y="${yTop}" width="${ow}" height="${op.heightCm}" fill="#fef3c7" stroke="#78350f" stroke-width="${2.4 * s}" />`
       );
@@ -342,10 +407,27 @@ export function buildElevationSvgString(
       parts.push(
         `<rect x="${op.sStartCm + inset}" y="${yTop + inset}" width="${Math.max(2, ow - inset * 2)}" height="${Math.max(2, op.heightCm - inset)}" fill="#fde68a" fill-opacity="0.45" stroke="#92400e" stroke-width="${1.2 * s}" />`
       );
-      // Handle dot
-      parts.push(
-        `<circle cx="${op.sEndCm - inset * 1.8}" cy="${yTop + op.heightCm * 0.52}" r="${2.6 * s}" fill="#451a03" />`
-      );
+      if (parsedDoor.mode === 'sliding') {
+        const dirSign = op.slideSignInView ?? 1;
+        parts.push(
+          `<line x1="${op.sStartCm - 12 * s}" y1="${yTop - 5 * s}" x2="${op.sEndCm + 12 * s}" y2="${yTop - 5 * s}" stroke="#334155" stroke-width="${2.4 * s}" stroke-linecap="round" />`
+        );
+        const ax1 = midX - dirSign * Math.min(ow * 0.25, 20 * s);
+        const ax2 = midX + dirSign * Math.min(ow * 0.25, 20 * s);
+        const ay = yTop + op.heightCm * 0.72;
+        parts.push(
+          `<line x1="${ax1}" y1="${ay}" x2="${ax2}" y2="${ay}" stroke="#2563eb" stroke-width="${1.8 * s}" />`
+        );
+        parts.push(
+          `<polygon points="${ax2},${ay} ${ax2 - dirSign * 6 * s},${ay - 3.5 * s} ${ax2 - dirSign * 6 * s},${ay + 3.5 * s}" fill="#2563eb" />`
+        );
+      } else {
+        const handleX =
+          (op.slideSignInView ?? -1) >= 0 ? op.sEndCm - inset * 1.8 : op.sStartCm + inset * 1.8;
+        parts.push(
+          `<circle cx="${handleX}" cy="${yTop + op.heightCm * 0.52}" r="${2.6 * s}" fill="#451a03" />`
+        );
+      }
     }
 
     // Opening title inside frame

@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { X, Trash2, Check } from 'lucide-react';
-import type { ElementKind, FloorplanElement, UnitType } from '../types/floorplan';
-import { formatDimension } from '../utils/floorplanGeometry';
+import type { DoorSwing, ElementKind, FloorplanElement, UnitType } from '../types/floorplan';
+import { buildDoorSwing, formatDimension, parseDoorSwing } from '../utils/floorplanGeometry';
 
 interface ElementDimensionsModalProps {
   element: FloorplanElement | null;
@@ -36,6 +36,7 @@ export const ElementDimensionsModal: React.FC<ElementDimensionsModalProps> = ({
   const [xCm, setXCm] = useState('0');
   const [yCm, setYCm] = useState('0');
   const [rotationDeg, setRotationDeg] = useState('0');
+  const [swingDirection, setSwingDirection] = useState<DoorSwing>('inward-right');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
@@ -49,6 +50,7 @@ export const ElementDimensionsModal: React.FC<ElementDimensionsModalProps> = ({
     setXCm(String(Math.round(element.xCm ?? 0)));
     setYCm(String(Math.round(element.yCm ?? 0)));
     setRotationDeg(String(Math.round(element.rotationDeg ?? 0)));
+    setSwingDirection(element.swingDirection || 'inward-right');
     setErrorMsg(null);
   }, [element]);
 
@@ -116,7 +118,9 @@ export const ElementDimensionsModal: React.FC<ElementDimensionsModalProps> = ({
         return;
       }
       patch.offsetCm = Math.round(noff * 10) / 10;
-      if (!isOpening) {
+      if (element.kind === 'door') {
+        patch.swingDirection = swingDirection;
+      } else if (!isOpening) {
         const nrot = Number(rotationDeg);
         if (Number.isFinite(nrot)) patch.rotationDeg = ((nrot % 360) + 360) % 360;
       }
@@ -333,6 +337,103 @@ export const ElementDimensionsModal: React.FC<ElementDimensionsModalProps> = ({
                   className="w-full px-2.5 py-1.5 text-sm font-mono tabular-nums border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
               </div>
+              {element.kind === 'door' &&
+                (() => {
+                  const parsed = parseDoorSwing(swingDirection);
+                  return (
+                    <div className="col-span-2 space-y-2">
+                      <span className="block text-xs font-medium text-slate-600">
+                        門型與開門方向
+                      </span>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        <div className="flex items-center gap-0.5 bg-slate-100 p-0.5 rounded-lg">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setSwingDirection(buildDoorSwing('swing', parsed.side, parsed.dir))
+                            }
+                            className={`flex-1 py-1 text-xs rounded-md transition-colors ${
+                              parsed.mode === 'swing'
+                                ? 'bg-white text-slate-900 font-semibold shadow-xs'
+                                : 'text-slate-600'
+                            }`}
+                          >
+                            推開門
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setSwingDirection(buildDoorSwing('sliding', parsed.side, parsed.dir))
+                            }
+                            className={`flex-1 py-1 text-xs rounded-md transition-colors ${
+                              parsed.mode === 'sliding'
+                                ? 'bg-indigo-600 text-white font-semibold shadow-xs'
+                                : 'text-slate-600'
+                            }`}
+                          >
+                            橫拉門
+                          </button>
+                        </div>
+                        <div className="flex items-center gap-0.5 bg-slate-100 p-0.5 rounded-lg">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setSwingDirection(buildDoorSwing(parsed.mode, 'inward', parsed.dir))
+                            }
+                            className={`flex-1 py-1 text-xs rounded-md transition-colors ${
+                              parsed.side === 'inward'
+                                ? 'bg-white text-slate-900 font-semibold shadow-xs'
+                                : 'text-slate-600'
+                            }`}
+                          >
+                            {parsed.mode === 'sliding' ? '內橫拉' : '內開'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setSwingDirection(buildDoorSwing(parsed.mode, 'outward', parsed.dir))
+                            }
+                            className={`flex-1 py-1 text-xs rounded-md transition-colors ${
+                              parsed.side === 'outward'
+                                ? 'bg-white text-slate-900 font-semibold shadow-xs'
+                                : 'text-slate-600'
+                            }`}
+                          >
+                            {parsed.mode === 'sliding' ? '外橫拉' : '外開'}
+                          </button>
+                        </div>
+                        <div className="flex items-center gap-0.5 bg-slate-100 p-0.5 rounded-lg">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setSwingDirection(buildDoorSwing(parsed.mode, parsed.side, 'left'))
+                            }
+                            className={`flex-1 py-1 text-xs rounded-md transition-colors ${
+                              parsed.dir === 'left'
+                                ? 'bg-white text-slate-900 font-semibold shadow-xs'
+                                : 'text-slate-600'
+                            }`}
+                          >
+                            {parsed.mode === 'sliding' ? '往左拉' : '左開'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setSwingDirection(buildDoorSwing(parsed.mode, parsed.side, 'right'))
+                            }
+                            className={`flex-1 py-1 text-xs rounded-md transition-colors ${
+                              parsed.dir === 'right'
+                                ? 'bg-white text-slate-900 font-semibold shadow-xs'
+                                : 'text-slate-600'
+                            }`}
+                          >
+                            {parsed.mode === 'sliding' ? '往右拉' : '右開'}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
               {!isOpening && (
                 <div>
                   <label

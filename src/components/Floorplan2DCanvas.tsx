@@ -26,9 +26,11 @@ import type {
 import {
   computeElementWallClearances,
   formatDimension,
+  getDoorSwingLabel,
   getNextSectionLabel,
   getSectionBasis,
   normalizeAngleDeg,
+  parseDoorSwing,
   rotateElementAngle,
 } from '../utils/floorplanGeometry';
 
@@ -46,13 +48,14 @@ interface Floorplan2DCanvasProps {
   selectedElementId: string | null;
   selectedSectionId?: string | null;
   sectionDrawMode?: boolean;
+  readOnly?: boolean;
   onSetSectionDrawMode?: (active: boolean) => void;
   onSelectEdge: (edgeId: string | null) => void;
   onSelectElement: (elementId: string | null) => void;
   onSelectSection?: (sectionId: string | null) => void;
   onMoveElement?: (elementId: string, xCm: number, yCm: number) => void;
   onRotateElement?: (elementId: string, rotationDeg: number) => void;
-  onFlipDoor?: (elementId: string, axis: 'hinge' | 'side') => void;
+  onFlipDoor?: (elementId: string, axis: 'hinge' | 'side' | 'type') => void;
   onBeginElementInteraction?: () => void;
   onEndElementInteraction?: () => void;
   onDoubleClickElement?: (elementId: string) => void;
@@ -102,6 +105,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
       selectedElementId,
       selectedSectionId = null,
       sectionDrawMode = false,
+      readOnly = false,
       onSetSectionDrawMode,
       onSelectEdge,
       onSelectElement,
@@ -231,17 +235,30 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
             h: r * 2,
           });
         } else if (pl.element.kind === 'door') {
-          const swing = pl.element.swingDirection || 'inward-right';
-          const swingNormal = swing.startsWith('outward') ? pl.outwardNormal : pl.inwardNormal;
-          const arcCenterX = pl.center.x + swingNormal.x * (pl.clampedWidthCm * 0.5);
-          const arcCenterY = pl.center.y + swingNormal.y * (pl.clampedWidthCm * 0.5);
-          const r = pl.clampedWidthCm * 0.52;
-          placedBoxes.push({
-            x: arcCenterX - r,
-            y: arcCenterY - r,
-            w: r * 2,
-            h: r * 2,
-          });
+          const parsedDoor = parseDoorSwing(pl.element.swingDirection);
+          const swingNormal = parsedDoor.side === 'outward' ? pl.outwardNormal : pl.inwardNormal;
+          if (parsedDoor.mode === 'sliding') {
+            const trackOff = 24 * s;
+            const cx = pl.center.x + swingNormal.x * trackOff;
+            const cy = pl.center.y + swingNormal.y * trackOff;
+            const r = pl.clampedWidthCm * 0.5;
+            placedBoxes.push({
+              x: cx - r,
+              y: cy - 18 * s,
+              w: r * 2,
+              h: 36 * s,
+            });
+          } else {
+            const arcCenterX = pl.center.x + swingNormal.x * (pl.clampedWidthCm * 0.5);
+            const arcCenterY = pl.center.y + swingNormal.y * (pl.clampedWidthCm * 0.5);
+            const r = pl.clampedWidthCm * 0.52;
+            placedBoxes.push({
+              x: arcCenterX - r,
+              y: arcCenterY - r,
+              w: r * 2,
+              h: r * 2,
+            });
+          }
         }
       }
 
@@ -373,7 +390,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
       (e: React.PointerEvent<SVGSVGElement>) => {
         if (e.button !== 0) return;
         const target = e.target as HTMLElement;
-        if (sectionDrawMode && onCreateSectionLine) {
+        if (!readOnly && sectionDrawMode && onCreateSectionLine) {
           const wp = clientToWorldCm(e.clientX, e.clientY);
           if (wp) {
             const sx = Math.round(wp.x);
@@ -395,7 +412,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
         };
         e.currentTarget.setPointerCapture(e.pointerId);
       },
-      [pan, sectionDrawMode, onCreateSectionLine, clientToWorldCm]
+      [pan, readOnly, sectionDrawMode, onCreateSectionLine, clientToWorldCm]
     );
 
     const handlePointerMove = useCallback(
@@ -932,7 +949,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
               e.stopPropagation();
               onSelectElement(element.id);
               onSelectEdge(null);
-              if (isFree && onMoveElement && e.button === 0) {
+              if (!readOnly && isFree && onMoveElement && e.button === 0) {
                 onBeginElementInteraction?.();
                 suppressNextSvgClickRef.current = true;
                 draggingElRef.current = {
@@ -950,7 +967,9 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
               e.stopPropagation();
               onSelectElement(element.id);
               onSelectEdge(null);
-              onDoubleClickElement?.(element.id);
+              if (!readOnly) {
+                onDoubleClickElement?.(element.id);
+              }
             };
 
             const buildRectCorners = (
@@ -1403,11 +1422,162 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
               );
             }
 
-            // Door architectural symbol: opening gap + door leaf + 90-deg swing arc
-            const swing = element.swingDirection || 'inward-right';
-            const isOutward = swing.startsWith('outward');
-            const isHingeEnd = swing.endsWith('right');
-            const swingNormal = isOutward ? pl.outwardNormal : pl.inwardNormal;
+            // Door architectural symbol: swinging (leaf + 90-deg arc) OR sliding (inner/outer track + slid panel + direction arrow)
+            const { mode: doorMode, side: doorSide, dir: doorDir } = parseDoorSwing(
+              element.swingDirection
+            );
+            const swingNormal = doorSide === 'outward' ? pl.outwardNormal : pl.inwardNormal;
+
+            if (doorMode === 'sliding') {
+              const slideDirVec: Point2D =
+                doorDir === 'right' ? tangent : { x: -tangent.x, y: -tangent.y };
+              const trackOff = wallStroke * 0.65 + 4 * s;
+              const railStartAnchor = doorDir === 'right' ? startPoint : endPoint;
+              const railOpenEnd = doorDir === 'right' ? endPoint : startPoint;
+              const railStart: Point2D = {
+                x: railStartAnchor.x + swingNormal.x * trackOff,
+                y: railStartAnchor.y + swingNormal.y * trackOff,
+              };
+              const railEnd: Point2D = {
+                x:
+                  railOpenEnd.x +
+                  slideDirVec.x * (pl.clampedWidthCm * 0.72) +
+                  swingNormal.x * trackOff,
+                y:
+                  railOpenEnd.y +
+                  slideDirVec.y * (pl.clampedWidthCm * 0.72) +
+                  swingNormal.y * trackOff,
+              };
+              const shiftDist = pl.clampedWidthCm * 0.55;
+              const leafStart: Point2D = {
+                x: startPoint.x + slideDirVec.x * shiftDist + swingNormal.x * trackOff,
+                y: startPoint.y + slideDirVec.y * shiftDist + swingNormal.y * trackOff,
+              };
+              const leafEnd: Point2D = {
+                x: endPoint.x + slideDirVec.x * shiftDist + swingNormal.x * trackOff,
+                y: endPoint.y + slideDirVec.y * shiftDist + swingNormal.y * trackOff,
+              };
+              const arrowOff = trackOff + 10 * s;
+              const arrA: Point2D = {
+                x:
+                  center.x -
+                  slideDirVec.x * (pl.clampedWidthCm * 0.25) +
+                  swingNormal.x * arrowOff,
+                y:
+                  center.y -
+                  slideDirVec.y * (pl.clampedWidthCm * 0.25) +
+                  swingNormal.y * arrowOff,
+              };
+              const arrB: Point2D = {
+                x:
+                  center.x +
+                  slideDirVec.x * (pl.clampedWidthCm * 0.25) +
+                  swingNormal.x * arrowOff,
+                y:
+                  center.y +
+                  slideDirVec.y * (pl.clampedWidthCm * 0.25) +
+                  swingNormal.y * arrowOff,
+              };
+              const headL: Point2D = {
+                x: arrB.x - slideDirVec.x * 7 * s + swingNormal.x * 4 * s,
+                y: arrB.y - slideDirVec.y * 7 * s + swingNormal.y * 4 * s,
+              };
+              const headR: Point2D = {
+                x: arrB.x - slideDirVec.x * 7 * s - swingNormal.x * 4 * s,
+                y: arrB.y - slideDirVec.y * 7 * s - swingNormal.y * 4 * s,
+              };
+
+              return (
+                <g
+                  key={element.id}
+                  data-interactive="true"
+                  data-element-id={element.id}
+                  data-door-swing={element.swingDirection || 'inward-right'}
+                  className="cursor-pointer"
+                  onDoubleClick={handleElementDoubleClick}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectElement(element.id);
+                    onSelectEdge(null);
+                  }}
+                >
+                  {/* Full opening & track hit target */}
+                  <polygon
+                    points={`${startPoint.x - swingNormal.x * wallStroke * 0.5},${startPoint.y - swingNormal.y * wallStroke * 0.5} ${endPoint.x - swingNormal.x * wallStroke * 0.5},${endPoint.y - swingNormal.y * wallStroke * 0.5} ${endPoint.x + swingNormal.x * (trackOff + 14 * s)},${endPoint.y + swingNormal.y * (trackOff + 14 * s)} ${startPoint.x + swingNormal.x * (trackOff + 14 * s)},${startPoint.y + swingNormal.y * (trackOff + 14 * s)}`}
+                    fill="transparent"
+                    stroke="none"
+                  />
+                  {/* Clear wall fill at door opening */}
+                  <line
+                    x1={startPoint.x}
+                    y1={startPoint.y}
+                    x2={endPoint.x}
+                    y2={endPoint.y}
+                    stroke="#f8fafc"
+                    strokeWidth={wallStroke + 2}
+                    strokeLinecap="butt"
+                  />
+                  {/* Threshold dashed guide */}
+                  <line
+                    x1={startPoint.x}
+                    y1={startPoint.y}
+                    x2={endPoint.x}
+                    y2={endPoint.y}
+                    stroke="#94a3b8"
+                    strokeWidth={1.2 * s}
+                    strokeDasharray={`${4 * s} ${3 * s}`}
+                  />
+                  {/* Sliding track rail */}
+                  <line
+                    x1={railStart.x}
+                    y1={railStart.y}
+                    x2={railEnd.x}
+                    y2={railEnd.y}
+                    stroke={isSelected ? '#2563eb' : '#64748b'}
+                    strokeWidth={1.6 * s}
+                    strokeDasharray={`${4 * s} ${3 * s}`}
+                  />
+                  {/* Slid door panel */}
+                  <line
+                    x1={leafStart.x}
+                    y1={leafStart.y}
+                    x2={leafEnd.x}
+                    y2={leafEnd.y}
+                    stroke={isSelected ? '#1d4ed8' : '#0f172a'}
+                    strokeWidth={4.4 * s}
+                    strokeLinecap="square"
+                  />
+                  {/* Direction arrow */}
+                  <line
+                    x1={arrA.x}
+                    y1={arrA.y}
+                    x2={arrB.x}
+                    y2={arrB.y}
+                    stroke={isSelected ? '#1d4ed8' : '#2563eb'}
+                    strokeWidth={1.6 * s}
+                  />
+                  <polygon
+                    points={`${arrB.x},${arrB.y} ${headL.x},${headL.y} ${headR.x},${headR.y}`}
+                    fill={isSelected ? '#1d4ed8' : '#2563eb'}
+                  />
+                  {/* Sliding door label */}
+                  <text
+                    x={center.x + swingNormal.x * (arrowOff + 13 * s)}
+                    y={center.y + swingNormal.y * (arrowOff + 13 * s)}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fill="#1e40af"
+                    fontSize={9.5 * s}
+                    fontWeight="600"
+                    className="pointer-events-none"
+                  >
+                    {element.name} ({doorSide === 'inward' ? '內橫拉' : '外橫拉'})
+                  </text>
+                </g>
+              );
+            }
+
+            const isHingeEnd = doorDir === 'right';
             const hinge = isHingeEnd ? endPoint : startPoint;
             const latch = isHingeEnd ? startPoint : endPoint;
             const leafTip: Point2D = {
@@ -1428,6 +1598,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                 key={element.id}
                 data-interactive="true"
                 data-element-id={element.id}
+                data-door-swing={element.swingDirection || 'inward-right'}
                 className="cursor-pointer"
                 onDoubleClick={handleElementDoubleClick}
                 onClick={(e) => {
@@ -1456,6 +1627,12 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                   strokeWidth={1.2 * s}
                   strokeDasharray={`${4 * s} ${3 * s}`}
                 />
+                {/* 90-degree swing sector hit & subtle architectural fill */}
+                <path
+                  d={`M ${hinge.x} ${hinge.y} L ${latch.x} ${latch.y} A ${pl.clampedWidthCm} ${pl.clampedWidthCm} 0 0 ${sweepFlag} ${leafTip.x} ${leafTip.y} Z`}
+                  fill="rgba(37, 99, 235, 0.05)"
+                  stroke="none"
+                />
                 {/* Door leaf */}
                 <line
                   x1={hinge.x}
@@ -1469,7 +1646,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                 {/* 90-degree swing arc */}
                 <path
                   d={`M ${latch.x} ${latch.y} A ${pl.clampedWidthCm} ${pl.clampedWidthCm} 0 0 ${sweepFlag} ${leafTip.x} ${leafTip.y}`}
-                  fill="rgba(37, 99, 235, 0.05)"
+                  fill="none"
                   stroke={isSelected ? '#1d4ed8' : '#2563eb'}
                   strokeWidth={1.5 * s}
                   strokeDasharray={`${5 * s} ${4 * s}`}
@@ -1565,13 +1742,14 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
             })}
 
           {/* Interactive Rotation Handle for Selected Furniture */}
-          {placements
-            .filter(
-              (pl) =>
-                pl.element.id === selectedElementId &&
-                pl.element.kind !== 'door' &&
-                pl.element.kind !== 'window'
-            )
+          {!readOnly &&
+            placements
+              .filter(
+                (pl) =>
+                  pl.element.id === selectedElementId &&
+                  pl.element.kind !== 'door' &&
+                  pl.element.kind !== 'window'
+              )
             .map((pl) => {
               const halfD = pl.element.depthCm * 0.5;
               const stemEnd: Point2D = {
@@ -1780,10 +1958,10 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                 ].map((node) => (
                   <g
                     key={node.ep}
-                    className="cursor-move"
+                    className={readOnly ? 'cursor-pointer' : 'cursor-move'}
                     onPointerDown={(e) => {
                       e.stopPropagation();
-                      if (e.button !== 0 || !onUpdateSectionLine) return;
+                      if (readOnly || e.button !== 0 || !onUpdateSectionLine) return;
                       onBeginElementInteraction?.();
                       onSelectSection?.(sec.id);
                       onSelectElement(null);
@@ -1891,20 +2069,57 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                 const el = selectedPl.element;
                 const isDoor = el.kind === 'door';
                 const isWindow = el.kind === 'window';
+                const parsedDoor = isDoor ? parseDoorSwing(el.swingDirection) : null;
+
+                if (readOnly) {
+                  return (
+                    <div className="flex flex-wrap items-center gap-2 bg-white/95 border border-slate-200 rounded-lg px-3 py-1.5 shadow-sm text-xs text-slate-700">
+                      <span className="font-semibold text-slate-900">{el.name}</span>
+                      <span aria-hidden="true">·</span>
+                      <span className="font-mono tabular-nums">
+                        {formatDimension(selectedPl.clampedWidthCm, project.unit)} ×{' '}
+                        {formatDimension(el.depthCm, project.unit)}
+                      </span>
+                      {isDoor && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="text-blue-700 font-medium">
+                            {getDoorSwingLabel(el.swingDirection)}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  );
+                }
+
                 return (
                   <div className="flex flex-wrap items-center gap-1.5 bg-white/95 border border-slate-200 rounded-lg px-2.5 py-1.5 shadow-sm">
                     <span className="text-xs font-semibold text-slate-800 mr-1 truncate max-w-[120px]">
                       {el.name}
                     </span>
-                    {isDoor && onFlipDoor ? (
+                    {isDoor && onFlipDoor && parsedDoor ? (
                       <>
+                        <span className="text-[11px] font-medium text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 whitespace-nowrap">
+                          {getDoorSwingLabel(el.swingDirection)}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => onFlipDoor(el.id, 'type')}
+                          className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                            parsedDoor.mode === 'sliding'
+                              ? 'bg-indigo-600 text-white hover:bg-indigo-700'
+                              : 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+                          }`}
+                        >
+                          <span>{parsedDoor.mode === 'sliding' ? '改為推開門' : '改為橫拉門'}</span>
+                        </button>
                         <button
                           type="button"
                           onClick={() => onFlipDoor(el.id, 'hinge')}
                           className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-blue-50 text-blue-700 hover:bg-blue-100 transition-colors whitespace-nowrap shrink-0"
                         >
                           <ArrowLeftRight className="w-3 h-3" />
-                          <span>左右反轉</span>
+                          <span>{parsedDoor.mode === 'sliding' ? '左右拉向' : '左/右開'}</span>
                         </button>
                         <button
                           type="button"
@@ -1912,7 +2127,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                           className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-slate-100 text-slate-700 hover:bg-slate-200 transition-colors whitespace-nowrap shrink-0"
                         >
                           <RotateCw className="w-3 h-3" />
-                          <span>內外反轉</span>
+                          <span>{parsedDoor.mode === 'sliding' ? '內/外橫拉' : '內/外開'}</span>
                         </button>
                       </>
                     ) : !isWindow && onRotateElement ? (
@@ -2017,7 +2232,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                   <span className="text-xs font-semibold text-rose-700 mr-1">
                     剖面線 {selectedSection.label}
                   </span>
-                  {onFlipSectionDirection && (
+                  {!readOnly && onFlipSectionDirection && (
                     <button
                       type="button"
                       onClick={() => onFlipSectionDirection(selectedSection.id)}
@@ -2037,7 +2252,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                       <span>檢視立面圖</span>
                     </button>
                   )}
-                  {onDeleteSectionLine && (
+                  {!readOnly && onDeleteSectionLine && (
                     <button
                       type="button"
                       onClick={() => onDeleteSectionLine(selectedSection.id)}
@@ -2055,7 +2270,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
 
           {/* Bottom-Right Subtle Blueprint Canvas Controls */}
           <div className="pointer-events-auto ml-auto shrink-0 flex items-center gap-1.5 bg-white/95 border border-slate-200 rounded-lg p-1 shadow-sm">
-            {onSetSectionDrawMode && (
+            {!readOnly && onSetSectionDrawMode && (
               <button
                 type="button"
                 onClick={() => onSetSectionDrawMode(!sectionDrawMode)}

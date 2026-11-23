@@ -14,6 +14,7 @@ import {
 import type { User } from 'firebase/auth';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import type {
+  DoorSwing,
   FloorplanElement,
   FloorplanProject,
   InteriorWall,
@@ -21,6 +22,7 @@ import type {
   SolvedFloorplan,
   WallEdge,
 } from '../types/floorplan';
+import { ALL_DOOR_SWINGS } from '../utils/floorplanGeometry';
 
 export interface CloudFloorplanRecord {
   id: string;
@@ -97,7 +99,7 @@ function sanitizeElement(el: FloorplanElement, idx: number): Record<string, unkn
   if (typeof el.yCm === 'number' && Number.isFinite(el.yCm)) {
     out.yCm = Math.round(el.yCm * 10) / 10;
   }
-  if (el.swingDirection) {
+  if (el.swingDirection && ALL_DOOR_SWINGS.includes(el.swingDirection as DoorSwing)) {
     out.swingDirection = el.swingDirection;
   }
   if (typeof el.showClearance === 'boolean') {

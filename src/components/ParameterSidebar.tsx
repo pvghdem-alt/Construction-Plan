@@ -27,9 +27,10 @@ import type {
   WallEdge,
 } from '../types/floorplan';
 import {
+  buildDoorSwing,
   ELEMENT_KIND_DEFAULTS,
-  flipDoorSwing,
   formatDimension,
+  parseDoorSwing,
   rotateElementAngle,
 } from '../utils/floorplanGeometry';
 
@@ -1258,75 +1259,194 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
                         </div>
                       </div>
 
-                      {el.kind === 'door' && (
-                        <div className="space-y-1.5">
-                          <div className="grid grid-cols-2 gap-2">
-                            <div>
-                              <label className="block text-[11px] text-slate-500 mb-0.5">
-                                開門方向
-                              </label>
-                              <select
-                                value={el.swingDirection || 'inward-right'}
-                                aria-label={`${el.name} 開門方向`}
-                                onChange={(e) =>
-                                  updateElement(el.id, {
-                                    swingDirection: e.target.value as DoorSwing,
-                                  })
-                                }
-                                className="w-full px-2 py-1 text-xs bg-white border border-slate-200 rounded"
-                              >
-                                <option value="inward-right">向內右開</option>
-                                <option value="inward-left">向內左開</option>
-                                <option value="outward-right">向外右開</option>
-                                <option value="outward-left">向外左開</option>
-                              </select>
+                      {el.kind === 'door' &&
+                        (() => {
+                          const parsedDoor = parseDoorSwing(el.swingDirection);
+                          return (
+                            <div className="space-y-2 pt-0.5">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[11px] text-slate-500">門扇型式</span>
+                                <div className="flex items-center gap-0.5 bg-slate-100 p-0.5 rounded">
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      updateElement(el.id, {
+                                        swingDirection: buildDoorSwing(
+                                          'swing',
+                                          parsedDoor.side,
+                                          parsedDoor.dir
+                                        ),
+                                      });
+                                    }}
+                                    className={`px-2 py-0.5 text-[11px] rounded transition-colors ${
+                                      parsedDoor.mode === 'swing'
+                                        ? 'bg-white text-slate-900 font-semibold shadow-xs'
+                                        : 'text-slate-600 hover:text-slate-900'
+                                    }`}
+                                  >
+                                    推開門
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      updateElement(el.id, {
+                                        swingDirection: buildDoorSwing(
+                                          'sliding',
+                                          parsedDoor.side,
+                                          parsedDoor.dir
+                                        ),
+                                      });
+                                    }}
+                                    className={`px-2 py-0.5 text-[11px] rounded transition-colors ${
+                                      parsedDoor.mode === 'sliding'
+                                        ? 'bg-indigo-600 text-white font-semibold shadow-xs'
+                                        : 'text-slate-600 hover:text-slate-900'
+                                    }`}
+                                  >
+                                    橫拉門
+                                  </button>
+                                </div>
+                              </div>
+
+                              <div className="grid grid-cols-2 gap-2">
+                                <div>
+                                  <label className="block text-[11px] text-slate-500 mb-0.5">
+                                    開門方向與位置
+                                  </label>
+                                  <select
+                                    value={el.swingDirection || 'inward-right'}
+                                    aria-label={`${el.name} 開門方向`}
+                                    onChange={(e) =>
+                                      updateElement(el.id, {
+                                        swingDirection: e.target.value as DoorSwing,
+                                      })
+                                    }
+                                    className="w-full px-2 py-1 text-xs bg-white border border-slate-200 rounded"
+                                  >
+                                    <optgroup label="推開門">
+                                      <option value="inward-right">向內右開</option>
+                                      <option value="inward-left">向內左開</option>
+                                      <option value="outward-right">向外右開</option>
+                                      <option value="outward-left">向外左開</option>
+                                    </optgroup>
+                                    <optgroup label="橫拉門">
+                                      <option value="sliding-inward-right">內橫拉（往右拉）</option>
+                                      <option value="sliding-inward-left">內橫拉（往左拉）</option>
+                                      <option value="sliding-outward-right">外橫拉（往右拉）</option>
+                                      <option value="sliding-outward-left">外橫拉（往左拉）</option>
+                                    </optgroup>
+                                  </select>
+                                </div>
+                                <div>
+                                  <label className="block text-[11px] text-slate-500 mb-0.5">
+                                    離地高 (cm)
+                                  </label>
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    value={el.elevationCm}
+                                    aria-label={`${el.name} 離地高`}
+                                    onChange={(e) =>
+                                      updateElement(el.id, {
+                                        elevationCm: Math.max(0, Number(e.target.value) || 0),
+                                      })
+                                    }
+                                    className="w-full px-2 py-1 text-xs font-mono tabular-nums border border-slate-200 rounded"
+                                  />
+                                </div>
+                              </div>
+
+                              <div className="grid grid-cols-2 gap-1.5">
+                                <div className="flex items-center gap-0.5 bg-slate-100 p-0.5 rounded">
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      updateElement(el.id, {
+                                        swingDirection: buildDoorSwing(
+                                          parsedDoor.mode,
+                                          'inward',
+                                          parsedDoor.dir
+                                        ),
+                                      });
+                                    }}
+                                    className={`flex-1 py-0.5 text-[11px] rounded transition-colors ${
+                                      parsedDoor.side === 'inward'
+                                        ? 'bg-white text-slate-900 font-semibold shadow-xs'
+                                        : 'text-slate-600 hover:text-slate-900'
+                                    }`}
+                                  >
+                                    {parsedDoor.mode === 'sliding' ? '內橫拉' : '內開'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      updateElement(el.id, {
+                                        swingDirection: buildDoorSwing(
+                                          parsedDoor.mode,
+                                          'outward',
+                                          parsedDoor.dir
+                                        ),
+                                      });
+                                    }}
+                                    className={`flex-1 py-0.5 text-[11px] rounded transition-colors ${
+                                      parsedDoor.side === 'outward'
+                                        ? 'bg-white text-slate-900 font-semibold shadow-xs'
+                                        : 'text-slate-600 hover:text-slate-900'
+                                    }`}
+                                  >
+                                    {parsedDoor.mode === 'sliding' ? '外橫拉' : '外開'}
+                                  </button>
+                                </div>
+                                <div className="flex items-center gap-0.5 bg-slate-100 p-0.5 rounded">
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      updateElement(el.id, {
+                                        swingDirection: buildDoorSwing(
+                                          parsedDoor.mode,
+                                          parsedDoor.side,
+                                          'left'
+                                        ),
+                                      });
+                                    }}
+                                    className={`flex-1 py-0.5 text-[11px] rounded transition-colors ${
+                                      parsedDoor.dir === 'left'
+                                        ? 'bg-white text-slate-900 font-semibold shadow-xs'
+                                        : 'text-slate-600 hover:text-slate-900'
+                                    }`}
+                                  >
+                                    {parsedDoor.mode === 'sliding' ? '往左拉' : '左開'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      updateElement(el.id, {
+                                        swingDirection: buildDoorSwing(
+                                          parsedDoor.mode,
+                                          parsedDoor.side,
+                                          'right'
+                                        ),
+                                      });
+                                    }}
+                                    className={`flex-1 py-0.5 text-[11px] rounded transition-colors ${
+                                      parsedDoor.dir === 'right'
+                                        ? 'bg-white text-slate-900 font-semibold shadow-xs'
+                                        : 'text-slate-600 hover:text-slate-900'
+                                    }`}
+                                  >
+                                    {parsedDoor.mode === 'sliding' ? '往右拉' : '右開'}
+                                  </button>
+                                </div>
+                              </div>
                             </div>
-                            <div>
-                              <label className="block text-[11px] text-slate-500 mb-0.5">
-                                離地高 (cm)
-                              </label>
-                              <input
-                                type="number"
-                                min={0}
-                                value={el.elevationCm}
-                                aria-label={`${el.name} 離地高`}
-                                onChange={(e) =>
-                                  updateElement(el.id, {
-                                    elevationCm: Math.max(0, Number(e.target.value) || 0),
-                                  })
-                                }
-                                className="w-full px-2 py-1 text-xs font-mono tabular-nums border border-slate-200 rounded"
-                              />
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-1.5">
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                updateElement(el.id, {
-                                  swingDirection: flipDoorSwing(el.swingDirection, 'hinge'),
-                                });
-                              }}
-                              className="flex-1 py-1 px-2 text-[11px] font-medium rounded border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100"
-                            >
-                              左右反轉門向
-                            </button>
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                updateElement(el.id, {
-                                  swingDirection: flipDoorSwing(el.swingDirection, 'side'),
-                                });
-                              }}
-                              className="flex-1 py-1 px-2 text-[11px] font-medium rounded border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100"
-                            >
-                              內外反轉門向
-                            </button>
-                          </div>
-                        </div>
-                      )}
+                          );
+                        })()}
 
                       {el.kind === 'window' && (
                         <div>

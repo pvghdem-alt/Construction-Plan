@@ -20,6 +20,7 @@ import {
   createPresetSectionLine,
   formatDimension,
   getSectionBasis,
+  parseDoorSwing,
 } from '../utils/floorplanGeometry';
 import { buildElevationSvgString } from '../utils/drawingSvgExport';
 
@@ -29,12 +30,13 @@ interface ElevationCanvasProps {
   placements: SolvedElementPlacement[];
   selectedSectionId: string | null;
   selectedElementId: string | null;
+  readOnly?: boolean;
   onSelectSection: (sectionId: string | null) => void;
   onSelectElement: (elementId: string | null) => void;
-  onAddSectionLine: (section: SectionLine) => void;
-  onFlipSectionDirection: (sectionId: string) => void;
-  onDeleteSectionLine: (sectionId: string) => void;
-  onSwitchToDraw2D: () => void;
+  onAddSectionLine?: (section: SectionLine) => void;
+  onFlipSectionDirection?: (sectionId: string) => void;
+  onDeleteSectionLine?: (sectionId: string) => void;
+  onSwitchToDraw2D?: () => void;
 }
 
 export const ElevationCanvas: React.FC<ElevationCanvasProps> = ({
@@ -43,6 +45,7 @@ export const ElevationCanvas: React.FC<ElevationCanvasProps> = ({
   placements,
   selectedSectionId,
   selectedElementId,
+  readOnly = false,
   onSelectSection,
   onSelectElement,
   onAddSectionLine,
@@ -99,6 +102,7 @@ export const ElevationCanvas: React.FC<ElevationCanvasProps> = ({
   }, [elevation, zoom, pan]);
 
   const handleQuickPreset = (dir: 'north' | 'south' | 'west' | 'east') => {
+    if (readOnly || !onAddSectionLine) return;
     const sec = createPresetSectionLine(solved, dir, sectionLines);
     onAddSectionLine(sec);
     onSelectSection(sec.id);
@@ -131,48 +135,54 @@ export const ElevationCanvas: React.FC<ElevationCanvasProps> = ({
           <div className="space-y-1.5">
             <h3 className="text-base font-bold text-slate-900">尚未設定剖面線</h3>
             <p className="text-xs text-slate-600 leading-relaxed">
-              在 2D 平面圖切一條剖面線並指定觀看方向（或直接使用下方快速剖面），即可自動產生含門窗尺寸、窗台高度與家具配置的立面圖，並一併匯入多頁 PDF。
+              {readOnly
+                ? '此唯讀分享圖面目前尚未包含剖面線區域，請切換至 2D 平面圖或 3D 空間檢視。'
+                : '在 2D 平面圖切一條剖面線並指定觀看方向（或直接使用下方快速剖面），即可自動產生含門窗尺寸、窗台高度與家具配置的立面圖，並一併匯入多頁 PDF。'}
             </p>
           </div>
 
-          <div className="grid grid-cols-2 gap-2 pt-1">
-            <button
-              type="button"
-              onClick={() => handleQuickPreset('north')}
-              className="px-3 py-2 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 transition-colors"
-            >
-              + 水平剖面（往北/上看）
-            </button>
-            <button
-              type="button"
-              onClick={() => handleQuickPreset('south')}
-              className="px-3 py-2 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 transition-colors"
-            >
-              + 水平剖面（往南/下看）
-            </button>
-            <button
-              type="button"
-              onClick={() => handleQuickPreset('west')}
-              className="px-3 py-2 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 transition-colors"
-            >
-              + 垂直剖面（往西/左看）
-            </button>
-            <button
-              type="button"
-              onClick={() => handleQuickPreset('east')}
-              className="px-3 py-2 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 transition-colors"
-            >
-              + 垂直剖面（往東/右看）
-            </button>
-          </div>
+          {!readOnly && (
+            <>
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => handleQuickPreset('north')}
+                  className="px-3 py-2 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 transition-colors"
+                >
+                  + 水平剖面（往北/上看）
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleQuickPreset('south')}
+                  className="px-3 py-2 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 transition-colors"
+                >
+                  + 水平剖面（往南/下看）
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleQuickPreset('west')}
+                  className="px-3 py-2 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 transition-colors"
+                >
+                  + 垂直剖面（往西/左看）
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleQuickPreset('east')}
+                  className="px-3 py-2 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 transition-colors"
+                >
+                  + 垂直剖面（往東/右看）
+                </button>
+              </div>
 
-          <button
-            type="button"
-            onClick={onSwitchToDraw2D}
-            className="w-full py-2.5 px-4 rounded-lg text-xs font-semibold bg-rose-600 text-white hover:bg-rose-700 transition-colors"
-          >
-            切換至 2D 平面圖手繪剖面線
-          </button>
+              <button
+                type="button"
+                onClick={() => onSwitchToDraw2D?.()}
+                className="w-full py-2.5 px-4 rounded-lg text-xs font-semibold bg-rose-600 text-white hover:bg-rose-700 transition-colors"
+              >
+                切換至 2D 平面圖手繪剖面線
+              </button>
+            </>
+          )}
         </div>
       </div>
     );
@@ -212,36 +222,42 @@ export const ElevationCanvas: React.FC<ElevationCanvasProps> = ({
               </button>
             );
           })}
-          <button
-            type="button"
-            onClick={() => handleQuickPreset('north')}
-            className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 whitespace-nowrap shrink-0"
-            title="新增一道水平中線剖面"
-          >
-            <Plus className="w-3 h-3" />
-            <span>水平剖面</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => handleQuickPreset('east')}
-            className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 whitespace-nowrap shrink-0"
-            title="新增一道垂直中線剖面"
-          >
-            <Plus className="w-3 h-3" />
-            <span>垂直剖面</span>
-          </button>
+          {!readOnly && (
+            <>
+              <button
+                type="button"
+                onClick={() => handleQuickPreset('north')}
+                className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 whitespace-nowrap shrink-0"
+                title="新增一道水平中線剖面"
+              >
+                <Plus className="w-3 h-3" />
+                <span>水平剖面</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => handleQuickPreset('east')}
+                className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 whitespace-nowrap shrink-0"
+                title="新增一道垂直中線剖面"
+              >
+                <Plus className="w-3 h-3" />
+                <span>垂直剖面</span>
+              </button>
+            </>
+          )}
         </div>
 
         <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => onFlipSectionDirection(activeSection.id)}
-            aria-label={`反轉剖面 ${activeSection.label} 觀看方向`}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 transition-colors whitespace-nowrap shrink-0"
-          >
-            <ArrowLeftRight className="w-3.5 h-3.5" />
-            <span>反轉觀看方向</span>
-          </button>
+          {!readOnly && onFlipSectionDirection && (
+            <button
+              type="button"
+              onClick={() => onFlipSectionDirection(activeSection.id)}
+              aria-label={`反轉剖面 ${activeSection.label} 觀看方向`}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 transition-colors whitespace-nowrap shrink-0"
+            >
+              <ArrowLeftRight className="w-3.5 h-3.5" />
+              <span>反轉觀看方向</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={handleExportSvg}
@@ -250,15 +266,17 @@ export const ElevationCanvas: React.FC<ElevationCanvasProps> = ({
             <Download className="w-3.5 h-3.5" />
             <span>立面 SVG</span>
           </button>
-          <button
-            type="button"
-            onClick={() => onDeleteSectionLine(activeSection.id)}
-            aria-label={`刪除剖面 ${activeSection.label}`}
-            className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-red-50 text-red-600 hover:bg-red-100 transition-colors whitespace-nowrap shrink-0"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-            <span>刪除</span>
-          </button>
+          {!readOnly && onDeleteSectionLine && (
+            <button
+              type="button"
+              onClick={() => onDeleteSectionLine(activeSection.id)}
+              aria-label={`刪除剖面 ${activeSection.label}`}
+              className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-red-50 text-red-600 hover:bg-red-100 transition-colors whitespace-nowrap shrink-0"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              <span>刪除</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -470,33 +488,73 @@ export const ElevationCanvas: React.FC<ElevationCanvasProps> = ({
                     />
                   </>
                 ) : (
-                  <>
-                    <rect
-                      x={op.sStartCm}
-                      y={yTop}
-                      width={ow}
-                      height={op.heightCm}
-                      fill="#fef3c7"
-                      stroke={isSel ? '#1d4ed8' : '#78350f'}
-                      strokeWidth={(isSel ? 2.8 : 2.2) * s}
-                    />
-                    <rect
-                      x={op.sStartCm + Math.min(ow * 0.12, 8 * s)}
-                      y={yTop + Math.min(ow * 0.12, 8 * s)}
-                      width={Math.max(2, ow - Math.min(ow * 0.12, 8 * s) * 2)}
-                      height={Math.max(2, op.heightCm - Math.min(ow * 0.12, 8 * s))}
-                      fill="#fde68a"
-                      fillOpacity="0.45"
-                      stroke="#92400e"
-                      strokeWidth={1.2 * s}
-                    />
-                    <circle
-                      cx={op.sEndCm - Math.min(ow * 0.18, 14 * s)}
-                      cy={yTop + op.heightCm * 0.52}
-                      r={2.5 * s}
-                      fill="#451a03"
-                    />
-                  </>
+                  (() => {
+                    const parsedDoor = parseDoorSwing(op.swingDirection);
+                    const inset = Math.min(ow * 0.12, 8 * s);
+                    const dirSign = op.slideSignInView ?? 1;
+                    const ax1 = midX - dirSign * Math.min(ow * 0.25, 20 * s);
+                    const ax2 = midX + dirSign * Math.min(ow * 0.25, 20 * s);
+                    const ay = yTop + op.heightCm * 0.72;
+                    const handleX =
+                      (op.slideSignInView ?? -1) >= 0
+                        ? op.sEndCm - inset * 1.8
+                        : op.sStartCm + inset * 1.8;
+                    return (
+                      <>
+                        <rect
+                          x={op.sStartCm}
+                          y={yTop}
+                          width={ow}
+                          height={op.heightCm}
+                          fill="#fef3c7"
+                          stroke={isSel ? '#1d4ed8' : '#78350f'}
+                          strokeWidth={(isSel ? 2.8 : 2.2) * s}
+                        />
+                        <rect
+                          x={op.sStartCm + inset}
+                          y={yTop + inset}
+                          width={Math.max(2, ow - inset * 2)}
+                          height={Math.max(2, op.heightCm - inset)}
+                          fill="#fde68a"
+                          fillOpacity="0.45"
+                          stroke="#92400e"
+                          strokeWidth={1.2 * s}
+                        />
+                        {parsedDoor.mode === 'sliding' ? (
+                          <>
+                            <line
+                              x1={op.sStartCm - 12 * s}
+                              y1={yTop - 5 * s}
+                              x2={op.sEndCm + 12 * s}
+                              y2={yTop - 5 * s}
+                              stroke="#334155"
+                              strokeWidth={2.4 * s}
+                              strokeLinecap="round"
+                            />
+                            <line
+                              x1={ax1}
+                              y1={ay}
+                              x2={ax2}
+                              y2={ay}
+                              stroke="#2563eb"
+                              strokeWidth={1.8 * s}
+                            />
+                            <polygon
+                              points={`${ax2},${ay} ${ax2 - dirSign * 6 * s},${ay - 3.5 * s} ${ax2 - dirSign * 6 * s},${ay + 3.5 * s}`}
+                              fill="#2563eb"
+                            />
+                          </>
+                        ) : (
+                          <circle
+                            cx={handleX}
+                            cy={yTop + op.heightCm * 0.52}
+                            r={2.5 * s}
+                            fill="#451a03"
+                          />
+                        )}
+                      </>
+                    );
+                  })()
                 )}
 
                 {/* Opening name & height label */}

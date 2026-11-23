@@ -388,6 +388,10 @@ async function createServer() {
         'inward-right',
         'outward-left',
         'outward-right',
+        'sliding-inward-left',
+        'sliding-inward-right',
+        'sliding-outward-left',
+        'sliding-outward-right',
       ]);
       const kindDefaults: Record<
         string,

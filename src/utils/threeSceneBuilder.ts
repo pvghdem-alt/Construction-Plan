@@ -6,7 +6,7 @@ import type {
   SolvedFloorplan,
   SolvedWallSegment,
 } from '../types/floorplan';
-import { formatDimension } from './floorplanGeometry';
+import { formatDimension, parseDoorSwing } from './floorplanGeometry';
 
 export const CM_TO_M = 0.01;
 
@@ -494,41 +494,97 @@ export function buildRoomSceneGroup(
       threshold.position.set(0, 0.0075, 0);
       doorGroup.add(threshold);
 
-      const swing = element.swingDirection || 'inward-right';
-      const isOutward = swing.startsWith('outward');
-      const isHingeRight = swing.endsWith('right');
+      const { mode: doorMode, side: doorSide, dir: doorDir } = parseDoorSwing(
+        element.swingDirection
+      );
+      const isOutward = doorSide === 'outward';
+      const isRight = doorDir === 'right';
+      const targetNormal = isOutward ? se.outwardNormal : se.inwardNormal;
+      // Local +Z in 2D world coordinates is (-se.tangent.y, se.tangent.x)
+      const swingDirLocalZ =
+        targetNormal.x * -se.tangent.y + targetNormal.y * se.tangent.x >= 0 ? 1 : -1;
       const leafW = Math.max(0.2, wM - jambT * 2);
       const leafH = Math.max(0.4, hM - jambT - 0.02);
 
-      const pivot = new THREE.Group();
-      pivot.position.set(
-        isHingeRight ? wM * 0.5 - jambT : -wM * 0.5 + jambT,
-        0.015,
-        0
-      );
-      const swingAngle = 0.48 * (isHingeRight ? -1 : 1) * (isOutward ? -1 : 1);
-      pivot.rotation.y = swingAngle;
+      if (doorMode === 'sliding') {
+        // Architectural Sliding Door (內橫拉 / 外橫拉): rail & rollers mounted on target face + partially slid door panel
+        const slideSign = isRight ? 1 : -1;
+        const trackOffsetZ = swingDirLocalZ * (jambDepth * 0.5 + 0.036);
+        const railLen = wM * 1.65;
+        const railCenterX = slideSign * wM * 0.34;
+        const railY = hM + 0.045;
 
-      const leafMesh = new THREE.Mesh(
-        new THREE.BoxGeometry(leafW, leafH, 0.042),
-        isSelected ? selectedAccentMat : doorLeafMat
-      );
-      leafMesh.position.set(isHingeRight ? -leafW * 0.5 : leafW * 0.5, leafH * 0.5, 0);
-      leafMesh.castShadow = !isSoftwareGl;
-      pivot.add(leafMesh);
+        const railBar = new THREE.Mesh(
+          new THREE.BoxGeometry(railLen, 0.036, 0.032),
+          metalMat
+        );
+        railBar.position.set(railCenterX, railY, trackOffsetZ * 0.92);
+        doorGroup.add(railBar);
 
-      const handle = new THREE.Mesh(
-        new THREE.BoxGeometry(0.11, 0.024, 0.085),
-        metalMat
-      );
-      handle.position.set(
-        isHingeRight ? -leafW + 0.09 : leafW - 0.09,
-        Math.min(1.02, leafH * 0.48),
-        0
-      );
-      pivot.add(handle);
+        const panelW = wM + 0.04;
+        const panelCenterX = slideSign * (wM * 0.52);
 
-      doorGroup.add(pivot);
+        // Dual overhead roller hangers
+        for (const rxOff of [-panelW * 0.32, panelW * 0.32]) {
+          const hanger = new THREE.Mesh(
+            new THREE.BoxGeometry(0.032, 0.075, 0.026),
+            metalMat
+          );
+          hanger.position.set(panelCenterX + rxOff, hM + 0.015, trackOffsetZ);
+          doorGroup.add(hanger);
+        }
+
+        const slidingPanel = new THREE.Mesh(
+          new THREE.BoxGeometry(panelW, leafH + 0.02, 0.042),
+          isSelected ? selectedAccentMat : doorLeafMat
+        );
+        slidingPanel.position.set(panelCenterX, (leafH + 0.02) * 0.5 + 0.01, trackOffsetZ);
+        slidingPanel.castShadow = !isSoftwareGl;
+        doorGroup.add(slidingPanel);
+
+        // Vertical recessed pull handle on leading edge facing the opening
+        const pullHandle = new THREE.Mesh(
+          new THREE.BoxGeometry(0.026, 0.22, 0.056),
+          metalMat
+        );
+        pullHandle.position.set(
+          panelCenterX - slideSign * (panelW * 0.5 - 0.08),
+          Math.min(1.05, leafH * 0.48),
+          trackOffsetZ
+        );
+        doorGroup.add(pullHandle);
+      } else {
+        const pivot = new THREE.Group();
+        pivot.position.set(
+          isRight ? wM * 0.5 - jambT : -wM * 0.5 + jambT,
+          0.015,
+          0
+        );
+        // Right-handed +Y rotation: (-X) leaf maps to +Z for +angle; (+X) leaf maps to +Z for -angle
+        const swingAngle = (isRight ? 1 : -1) * swingDirLocalZ * 0.62;
+        pivot.rotation.y = swingAngle;
+
+        const leafMesh = new THREE.Mesh(
+          new THREE.BoxGeometry(leafW, leafH, 0.042),
+          isSelected ? selectedAccentMat : doorLeafMat
+        );
+        leafMesh.position.set(isRight ? -leafW * 0.5 : leafW * 0.5, leafH * 0.5, 0);
+        leafMesh.castShadow = !isSoftwareGl;
+        pivot.add(leafMesh);
+
+        const handle = new THREE.Mesh(
+          new THREE.BoxGeometry(0.11, 0.024, 0.085),
+          metalMat
+        );
+        handle.position.set(
+          isRight ? -leafW + 0.09 : leafW - 0.09,
+          Math.min(1.02, leafH * 0.48),
+          0
+        );
+        pivot.add(handle);
+
+        doorGroup.add(pivot);
+      }
       roomGroup.add(doorGroup);
     } else if (element.kind === 'window') {
       if (!se) continue;
