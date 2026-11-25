@@ -15,8 +15,18 @@ import {
   Share2,
   Lock,
 } from 'lucide-react';
-import { onAuthStateChanged, signInWithPopup, signOut, type User } from 'firebase/auth';
+import {
+  createUserWithEmailAndPassword,
+  onAuthStateChanged,
+  sendEmailVerification,
+  sendPasswordResetEmail,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  signOut,
+  type User,
+} from 'firebase/auth';
 import { auth, googleProvider } from './firebase';
+import { formatFirebaseAuthError } from './utils/authErrorMessages';
 import {
   deleteCloudFloorplan,
   ensureUserProfile,
@@ -162,6 +172,7 @@ export default function App() {
   // Firebase Auth & Cloud Storage State
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  const [authRefreshTick, setAuthRefreshTick] = useState(0);
   const [cloudModalOpen, setCloudModalOpen] = useState(false);
   const [cloudRecords, setCloudRecords] = useState<CloudFloorplanRecord[]>([]);
   const [isLoadingCloud, setIsLoadingCloud] = useState(false);
@@ -251,7 +262,7 @@ export default function App() {
     [project.elements, editingElementId]
   );
 
-  // Auth listener + conditional Firestore onSnapshot listener
+  // Auth listener + conditional Firestore onSnapshot listener (requires verified email per firestore.rules)
   useEffect(() => {
     const unsubAuth = onAuthStateChanged(auth, (nextUser) => {
       setUser(nextUser);
@@ -260,19 +271,28 @@ export default function App() {
         setCloudRecords([]);
         setActiveCloudId(null);
         setCloudError(null);
-      } else {
+        setIsLoadingCloud(false);
+      } else if (nextUser.emailVerified) {
         void ensureUserProfile(nextUser).catch((err) => {
           setCloudError(err instanceof Error ? err.message : '無法建立使用者資料');
         });
+      } else {
+        setCloudRecords([]);
+        setActiveCloudId(null);
+        setCloudError(null);
+        setIsLoadingCloud(false);
       }
     });
     return () => unsubAuth();
   }, []);
 
   useEffect(() => {
-    if (!authReady || !user) return;
+    if (!authReady || !user || !user.emailVerified) return;
     setIsLoadingCloud(true);
     setCloudError(null);
+    void ensureUserProfile(user).catch((err) => {
+      setCloudError(err instanceof Error ? err.message : '無法建立使用者資料');
+    });
     const unsub = subscribeUserFloorplans(
       user.uid,
       (records) => {
@@ -285,15 +305,78 @@ export default function App() {
       }
     );
     return () => unsub();
-  }, [authReady, user]);
+  }, [authReady, user, authRefreshTick]);
 
   const handleSignIn = useCallback(async () => {
     setCloudError(null);
     try {
       await signInWithPopup(auth, googleProvider);
     } catch (err) {
-      setCloudError(err instanceof Error ? err.message : 'Google 登入失敗，請稍後再試。');
+      const host = typeof window !== 'undefined' ? window.location.hostname : '';
+      setCloudError(formatFirebaseAuthError(err, host));
     }
+  }, []);
+
+  const handleSignInWithEmail = useCallback(async (email: string, password: string) => {
+    setCloudError(null);
+    try {
+      await signInWithEmailAndPassword(auth, email.trim(), password);
+    } catch (err) {
+      const host = typeof window !== 'undefined' ? window.location.hostname : '';
+      const msg = formatFirebaseAuthError(err, host);
+      setCloudError(msg);
+      throw new Error(msg);
+    }
+  }, []);
+
+  const handleRegisterWithEmail = useCallback(async (email: string, password: string) => {
+    setCloudError(null);
+    try {
+      const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
+      if (cred.user && !cred.user.emailVerified) {
+        await sendEmailVerification(cred.user);
+      }
+    } catch (err) {
+      const host = typeof window !== 'undefined' ? window.location.hostname : '';
+      const msg = formatFirebaseAuthError(err, host);
+      setCloudError(msg);
+      throw new Error(msg);
+    }
+  }, []);
+
+  const handleSendPasswordReset = useCallback(async (email: string) => {
+    setCloudError(null);
+    try {
+      await sendPasswordResetEmail(auth, email.trim());
+    } catch (err) {
+      const host = typeof window !== 'undefined' ? window.location.hostname : '';
+      const msg = formatFirebaseAuthError(err, host);
+      setCloudError(msg);
+      throw new Error(msg);
+    }
+  }, []);
+
+  const handleSendVerificationEmail = useCallback(async () => {
+    if (!auth.currentUser) throw new Error('請先登入帳號。');
+    setCloudError(null);
+    try {
+      await sendEmailVerification(auth.currentUser);
+    } catch (err) {
+      const host = typeof window !== 'undefined' ? window.location.hostname : '';
+      const msg = formatFirebaseAuthError(err, host);
+      setCloudError(msg);
+      throw new Error(msg);
+    }
+  }, []);
+
+  const handleReloadVerification = useCallback(async (): Promise<boolean> => {
+    if (!auth.currentUser) return false;
+    setCloudError(null);
+    await auth.currentUser.reload();
+    await auth.currentUser.getIdToken(true);
+    setUser(auth.currentUser);
+    setAuthRefreshTick((t) => t + 1);
+    return auth.currentUser.emailVerified;
   }, []);
 
   const handleSignOut = useCallback(async () => {
@@ -1180,6 +1263,11 @@ export default function App() {
             user={user}
             authReady={authReady}
             onSignIn={handleSignIn}
+            onSignInWithEmail={handleSignInWithEmail}
+            onRegisterWithEmail={handleRegisterWithEmail}
+            onSendPasswordReset={handleSendPasswordReset}
+            onSendVerificationEmail={handleSendVerificationEmail}
+            onReloadVerification={handleReloadVerification}
             onSignOut={handleSignOut}
             currentProject={project}
             currentSolved={solved}

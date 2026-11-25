@@ -12,6 +12,9 @@ import {
   AlertCircle,
   Loader2,
   RefreshCw,
+  Mail,
+  KeyRound,
+  ShieldAlert,
 } from 'lucide-react';
 import type { User } from 'firebase/auth';
 import type { FloorplanProject, SolvedFloorplan } from '../types/floorplan';
@@ -23,6 +26,11 @@ interface CloudStorageModalProps {
   user: User | null;
   authReady: boolean;
   onSignIn: () => Promise<void>;
+  onSignInWithEmail: (email: string, password: string) => Promise<void>;
+  onRegisterWithEmail: (email: string, password: string) => Promise<void>;
+  onSendPasswordReset: (email: string) => Promise<void>;
+  onSendVerificationEmail: () => Promise<void>;
+  onReloadVerification: () => Promise<boolean>;
   onSignOut: () => Promise<void>;
   currentProject: FloorplanProject;
   currentSolved: SolvedFloorplan;
@@ -57,6 +65,11 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
   user,
   authReady,
   onSignIn,
+  onSignInWithEmail,
+  onRegisterWithEmail,
+  onSendPasswordReset,
+  onSendVerificationEmail,
+  onReloadVerification,
   onSignOut,
   currentProject,
   currentSolved,
@@ -76,6 +89,11 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [emailDraft, setEmailDraft] = useState('');
+  const [passwordDraft, setPasswordDraft] = useState('');
+  const [isAuthBusy, setIsAuthBusy] = useState(false);
+
   // Sync draft when modal opens or projectName changes
   React.useEffect(() => {
     if (isOpen) {
@@ -84,6 +102,83 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
       setActionError(null);
     }
   }, [isOpen, currentProject.projectName]);
+
+  const handleEmailAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmedEmail = emailDraft.trim();
+    if (!trimmedEmail || !passwordDraft) {
+      setActionError('請輸入 Email 與密碼。');
+      return;
+    }
+    setIsAuthBusy(true);
+    setActionError(null);
+    setStatusMessage(null);
+    try {
+      if (authMode === 'login') {
+        await onSignInWithEmail(trimmedEmail, passwordDraft);
+        setStatusMessage(`已登入帳號：${trimmedEmail}`);
+      } else {
+        await onRegisterWithEmail(trimmedEmail, passwordDraft);
+        setStatusMessage('帳號建立成功！已寄出驗證信，請點擊信中連結後按下「我已完成驗證」。');
+      }
+      setPasswordDraft('');
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Email 登入失敗，請稍後再試。');
+    } finally {
+      setIsAuthBusy(false);
+    }
+  };
+
+  const handleResetPasswordClick = async () => {
+    const trimmedEmail = emailDraft.trim();
+    if (!trimmedEmail) {
+      setActionError('請先在上方輸入 Email，再點擊「忘記密碼」。');
+      return;
+    }
+    setIsAuthBusy(true);
+    setActionError(null);
+    setStatusMessage(null);
+    try {
+      await onSendPasswordReset(trimmedEmail);
+      setStatusMessage(`已寄送重設密碼信至 ${trimmedEmail}，請查看收件匣或垃圾郵件。`);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : '寄送重設密碼信失敗。');
+    } finally {
+      setIsAuthBusy(false);
+    }
+  };
+
+  const handleResendVerificationClick = async () => {
+    setIsAuthBusy(true);
+    setActionError(null);
+    setStatusMessage(null);
+    try {
+      await onSendVerificationEmail();
+      setStatusMessage(`已寄出驗證信至 ${user?.email || '您的信箱'}，請點擊信中連結完成驗證。`);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : '寄送驗證信失敗，請稍後再試。');
+    } finally {
+      setIsAuthBusy(false);
+    }
+  };
+
+  const handleCheckVerifiedClick = async () => {
+    setIsAuthBusy(true);
+    setActionError(null);
+    setStatusMessage(null);
+    try {
+      const ok = await onReloadVerification();
+      if (ok) {
+        setStatusMessage('信箱驗證已完成，已載入雲端空間！');
+      } else {
+        setActionError('系統偵測此信箱尚未完成驗證，請確認已點擊驗證信內的連結後再試一次。');
+      }
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : '檢查驗證狀態失敗。');
+    } finally {
+      setIsAuthBusy(false);
+    }
+  };
 
   const filteredRecords = useMemo(() => {
     const q = searchTerm.trim().toLowerCase();
@@ -214,7 +309,7 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
                   )}
                   <div className="min-w-0">
                     <p className="text-xs font-semibold text-slate-900 truncate">
-                      {user.displayName || 'Google 使用者'}
+                      {user.displayName || '雲端空間使用者'}
                     </p>
                     <p className="text-xs text-slate-500 truncate">{user.email}</p>
                   </div>
@@ -229,23 +324,121 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
                 </button>
               </>
             ) : (
-              <div className="w-full flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div className="space-y-0.5">
-                  <p className="text-xs font-semibold text-slate-900">
-                    登入 Google 帳號以啟用雲端同步
-                  </p>
-                  <p className="text-xs text-slate-500">
-                    您的平面圖、牆段尺寸、門窗與家具配置將安全儲存於個人專屬雲端空間
-                  </p>
+              <div className="w-full space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-200">
+                  <div className="space-y-0.5">
+                    <p className="text-xs font-semibold text-slate-900">
+                      登入雲端帳號以存取個人平面圖專案
+                    </p>
+                    <p className="text-[11px] text-slate-500">
+                      在 GitHub Pages 等自訂網域推薦直接使用「Email / 密碼登入」，無需設定彈窗授權網域
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={isAuthBusy}
+                    onClick={onSignIn}
+                    className="flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold bg-white text-slate-800 border border-slate-300 hover:bg-slate-100 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
+                  >
+                    <LogIn className="w-3.5 h-3.5 text-blue-600" />
+                    <span>使用 Google 登入</span>
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={onSignIn}
-                  className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 transition-colors whitespace-nowrap shrink-0"
-                >
-                  <LogIn className="w-4 h-4" />
-                  <span>使用 Google 登入</span>
-                </button>
+
+                <form onSubmit={handleEmailAuthSubmit} className="space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="inline-flex rounded-lg bg-slate-200/70 p-0.5 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAuthMode('login');
+                          setActionError(null);
+                        }}
+                        className={`px-3 py-1 rounded-md font-semibold transition-colors ${
+                          authMode === 'login'
+                            ? 'bg-white text-slate-900 shadow-xs'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        Email 登入
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAuthMode('register');
+                          setActionError(null);
+                        }}
+                        className={`px-3 py-1 rounded-md font-semibold transition-colors ${
+                          authMode === 'register'
+                            ? 'bg-white text-slate-900 shadow-xs'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        註冊新帳號
+                      </button>
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={isAuthBusy}
+                      onClick={handleResetPasswordClick}
+                      className="text-[11px] font-medium text-blue-600 hover:text-blue-800 hover:underline disabled:opacity-50"
+                    >
+                      忘記密碼？
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div>
+                      <label htmlFor="cloud-auth-email" className="block text-[11px] font-medium text-slate-700 mb-1">
+                        Email 信箱
+                      </label>
+                      <div className="relative">
+                        <Mail className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        <input
+                          id="cloud-auth-email"
+                          type="email"
+                          required
+                          autoComplete="email"
+                          value={emailDraft}
+                          onChange={(e) => setEmailDraft(e.target.value)}
+                          placeholder="jason2134@gmail.com"
+                          className="w-full pl-8 pr-3 py-2 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label htmlFor="cloud-auth-password" className="block text-[11px] font-medium text-slate-700 mb-1">
+                        密碼
+                      </label>
+                      <div className="relative">
+                        <KeyRound className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        <input
+                          id="cloud-auth-password"
+                          type="password"
+                          required
+                          autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
+                          value={passwordDraft}
+                          onChange={(e) => setPasswordDraft(e.target.value)}
+                          placeholder="請輸入密碼（至少 6 碼）"
+                          className="w-full pl-8 pr-3 py-2 text-xs bg-white border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex justify-end">
+                    <button
+                      type="submit"
+                      disabled={isAuthBusy}
+                      className="flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                    >
+                      {isAuthBusy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                      <span>{authMode === 'login' ? '使用 Email 登入' : '建立帳號並寄送驗證信'}</span>
+                    </button>
+                  </div>
+                </form>
               </div>
             )}
           </div>
@@ -267,7 +460,39 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
             </div>
           )}
 
-          {user && (
+          {user && !user.emailVerified && (
+            <div className="p-4 rounded-xl border border-amber-300 bg-amber-50 space-y-3 text-xs text-amber-900">
+              <div className="flex items-start gap-2.5">
+                <ShieldAlert className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p className="font-bold">此 Email 帳號尚未完成信箱驗證</p>
+                  <p className="text-amber-800 leading-relaxed">
+                    資料庫安全規則要求驗證信箱後才可讀寫雲端專案。若您在 Firebase 後台手動建立帳號，請點選下方「寄送驗證信」至 <span className="font-mono font-semibold">{user.email}</span>，點擊信中連結後再按「我已完成驗證」。
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isAuthBusy}
+                  onClick={handleResendVerificationClick}
+                  className="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-amber-700 text-white hover:bg-amber-800 disabled:opacity-50 transition-colors"
+                >
+                  寄送驗證信
+                </button>
+                <button
+                  type="button"
+                  disabled={isAuthBusy}
+                  onClick={handleCheckVerifiedClick}
+                  className="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-white text-amber-900 border border-amber-300 hover:bg-amber-100 disabled:opacity-50 transition-colors"
+                >
+                  我已完成驗證，重新檢查
+                </button>
+              </div>
+            </div>
+          )}
+
+          {user && user.emailVerified && (
             <>
               {/* Save Current Workspace Panel */}
               <div className="p-4 rounded-xl border border-slate-200 bg-white space-y-3">

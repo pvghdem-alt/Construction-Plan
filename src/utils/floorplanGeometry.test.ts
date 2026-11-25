@@ -41,6 +41,7 @@ import {
   L_STUDIO_PRESET,
   ROOM_IN_ROOM_PRESET,
 } from './samplePresets';
+import { formatFirebaseAuthError } from './authErrorMessages';
 
 test('snapAngleDeg snaps near-orthogonal and near-diagonal angles when enabled', () => {
   assert.deepEqual(snapAngleDeg(3, true, 8), { angleDeg: 0, snapped: true });
@@ -352,5 +353,22 @@ test('shareLink encodes, compresses, extracts, and sanitizes read-only floorplan
   assert.equal(sanitizeSharedProject({ edges: [{ lengthCm: 100, angleDeg: 0 }] }), null);
 });
 
+test('formatFirebaseAuthError maps Firebase auth error codes to clear Traditional Chinese guidance', () => {
+  const unauthDomainMsg = formatFirebaseAuthError(
+    new Error('Firebase: Error (auth/unauthorized-domain).'),
+    'pvghdem-alt.github.io'
+  );
+  assert.ok(unauthDomainMsg.includes('pvghdem-alt.github.io'));
+  assert.ok(unauthDomainMsg.includes('Email / 密碼登入'));
 
+  const invalidCredMsg = formatFirebaseAuthError(
+    new Error('Firebase: Error (auth/invalid-credential).')
+  );
+  assert.ok(invalidCredMsg.includes('Email 或密碼不正確'));
 
+  const weakPwMsg = formatFirebaseAuthError(new Error('Firebase: Error (auth/weak-password).'));
+  assert.ok(weakPwMsg.includes('6 個字元'));
+
+  const fallbackMsg = formatFirebaseAuthError(new Error('Custom network hiccup'));
+  assert.equal(fallbackMsg, 'Custom network hiccup');
+});
