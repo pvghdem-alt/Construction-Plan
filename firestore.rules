@@ -125,6 +125,9 @@ service cloud.firestore {
           'ownerDisplayName',
           'sourcePlanId',
           'sharedWithEmails',
+          'accessLevel',
+          'lastEditedByEmail',
+          'lastEditedByName',
           'projectName',
           'ceilingHeightCm',
           'wallThicknessCm',
@@ -142,7 +145,6 @@ service cloud.firestore {
           'updatedAt'
         ]) &&
         isValidId(data.ownerId) &&
-        data.ownerId == request.auth.uid &&
         isValidId(data.sourcePlanId) &&
         (!data.keys().hasAny(['ownerDisplayName']) || (data.ownerDisplayName is string && data.ownerDisplayName.size() <= 120)) &&
         data.sharedWithEmails is list &&
@@ -151,12 +153,20 @@ service cloud.firestore {
         data.sharedWithEmails[0] is string &&
         data.sharedWithEmails[0].size() >= 3 &&
         data.sharedWithEmails[0].size() <= 120 &&
+        (!data.keys().hasAny(['accessLevel']) || (data.accessLevel is string && data.accessLevel in ['editor', 'viewer'])) &&
+        (!data.keys().hasAny(['lastEditedByEmail']) || (data.lastEditedByEmail is string && data.lastEditedByEmail.size() >= 3 && data.lastEditedByEmail.size() <= 120)) &&
+        (!data.keys().hasAny(['lastEditedByName']) || (data.lastEditedByName is string && data.lastEditedByName.size() <= 120)) &&
         hasValidFloorplanBody(data);
     }
 
     function isSharedRecipient(docData) {
       return request.auth.token.email is string &&
         request.auth.token.email.lower() in docData.sharedWithEmails;
+    }
+
+    function isSharedEditor(docData) {
+      return isSharedRecipient(docData) &&
+        (!docData.keys().hasAny(['accessLevel']) || docData.accessLevel == 'editor');
     }
 
     match /users/{userId} {
@@ -199,39 +209,73 @@ service cloud.firestore {
     }
 
     match /shared_floorplans/{shareId} {
-      allow get: if isSignedIn() && isValidId(shareId) &&
-        (existing().ownerId == request.auth.uid || isSharedRecipient(existing()));
+      allow get: if isSignedIn() && isValidId(shareId) && (
+        (resource == null && shareId.matches('^share_' + request.auth.uid + '_.*$')) ||
+        (resource != null && (existing().ownerId == request.auth.uid || isSharedRecipient(existing())))
+      );
       allow list: if isSignedIn() &&
         (resource.data.ownerId == request.auth.uid || isSharedRecipient(resource.data));
       allow create: if isSignedIn() && isValidId(shareId) &&
         isValidSharedFloorplan(incoming()) &&
+        incoming().ownerId == request.auth.uid &&
         incoming().createdAt == request.time &&
         exists(/databases/$(database)/documents/users/$(request.auth.uid)/floorplans/$(incoming().sourcePlanId)) &&
         get(/databases/$(database)/documents/users/$(request.auth.uid)/floorplans/$(incoming().sourcePlanId)).data.ownerId == request.auth.uid;
       allow update: if isSignedIn() && isValidId(shareId) &&
         isValidSharedFloorplan(incoming()) &&
-        existing().ownerId == request.auth.uid &&
         incoming().ownerId == existing().ownerId &&
         incoming().sourcePlanId == existing().sourcePlanId &&
         incoming().createdAt == existing().createdAt &&
-        incoming().diff(existing()).affectedKeys().hasOnly([
-          'ownerDisplayName',
-          'sharedWithEmails',
-          'projectName',
-          'ceilingHeightCm',
-          'wallThicknessCm',
-          'unit',
-          'autoSnapAngles',
-          'snapToleranceDeg',
-          'forceClose',
-          'analysisNotes',
-          'edges',
-          'interiorWalls',
-          'elements',
-          'sectionLines',
-          'summary',
-          'updatedAt'
-        ]);
+        (
+          (
+            existing().ownerId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'ownerDisplayName',
+              'sharedWithEmails',
+              'accessLevel',
+              'lastEditedByEmail',
+              'lastEditedByName',
+              'projectName',
+              'ceilingHeightCm',
+              'wallThicknessCm',
+              'unit',
+              'autoSnapAngles',
+              'snapToleranceDeg',
+              'forceClose',
+              'analysisNotes',
+              'edges',
+              'interiorWalls',
+              'elements',
+              'sectionLines',
+              'summary',
+              'updatedAt'
+            ])
+          ) ||
+          (
+            isSharedEditor(existing()) &&
+            request.auth.token.email is string &&
+            incoming().keys().hasAny(['lastEditedByEmail']) &&
+            incoming().lastEditedByEmail == request.auth.token.email.lower() &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'lastEditedByEmail',
+              'lastEditedByName',
+              'projectName',
+              'ceilingHeightCm',
+              'wallThicknessCm',
+              'unit',
+              'autoSnapAngles',
+              'snapToleranceDeg',
+              'forceClose',
+              'analysisNotes',
+              'edges',
+              'interiorWalls',
+              'elements',
+              'sectionLines',
+              'summary',
+              'updatedAt'
+            ])
+          )
+        );
       allow delete: if isSignedIn() && isValidId(shareId) && existing().ownerId == request.auth.uid;
     }
   }

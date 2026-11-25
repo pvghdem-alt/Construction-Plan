@@ -94,3 +94,46 @@ export function buildShareDocId(ownerId: string, sourcePlanId: string): string {
   const suffix = (hash >>> 0).toString(36);
   return `${candidate.slice(0, 128 - suffix.length - 1)}_${suffix}`;
 }
+
+export type ShareAccessLevel = 'editor' | 'viewer';
+
+export function normalizeShareAccessLevel(value: unknown): ShareAccessLevel {
+  return value === 'viewer' ? 'viewer' : 'editor';
+}
+
+export interface VersionedPlanSnapshot<TProject, TSummary> {
+  project: TProject;
+  summary: TSummary;
+  updatedAtMs: number;
+  lastEditedByEmail?: string;
+  lastEditedByName?: string;
+}
+
+export function resolveLatestFloorplanForOwner<TProject, TSummary>(
+  ownRecord: VersionedPlanSnapshot<TProject, TSummary>,
+  shareRecord?: VersionedPlanSnapshot<TProject, TSummary>
+): {
+  useSharedVersion: boolean;
+  project: TProject;
+  summary: TSummary;
+  updatedAtMs: number;
+  editedByLabel: string;
+} {
+  if (shareRecord && shareRecord.updatedAtMs > ownRecord.updatedAtMs + 1000) {
+    return {
+      useSharedVersion: true,
+      project: shareRecord.project,
+      summary: shareRecord.summary,
+      updatedAtMs: shareRecord.updatedAtMs,
+      editedByLabel: shareRecord.lastEditedByName || shareRecord.lastEditedByEmail || '共同編輯者',
+    };
+  }
+  return {
+    useSharedVersion: false,
+    project: ownRecord.project,
+    summary: ownRecord.summary,
+    updatedAtMs: ownRecord.updatedAtMs,
+    editedByLabel: '',
+  };
+}
+

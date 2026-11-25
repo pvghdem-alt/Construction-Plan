@@ -45,9 +45,16 @@ import { formatFirebaseAuthError } from './authErrorMessages';
 import {
   buildShareDocId,
   mergeShareEmailLists,
+  normalizeShareAccessLevel,
   parseShareEmailsInput,
   removeShareEmail,
+  resolveLatestFloorplanForOwner,
 } from './cloudShareHelpers';
+import {
+  computeCeilingRulerPosition,
+  computeOpeningBadgePosition,
+  computeWallDimensionLayout,
+} from './threeDimensionLayout';
 
 test('snapAngleDeg snaps near-orthogonal and near-diagonal angles when enabled', () => {
   assert.deepEqual(snapAngleDeg(3, true, 8), { angleDeg: 0, snapped: true });
@@ -402,4 +409,69 @@ test('cloudShareHelpers parses, deduplicates, merges, removes emails and builds 
   assert.ok(longId.length <= 128);
   assert.ok(/^[a-zA-Z0-9_-]{1,128}$/.test(longId));
 });
+
+test('threeDimensionLayout keeps badges clear of wall geometry and ceiling headers', () => {
+  const solved = solveFloorplan(CARE_ROOM_PRESET);
+  const placements = resolveElementPlacements(CARE_ROOM_PRESET.elements, solved);
+  const wallThickM = CARE_ROOM_PRESET.wallThicknessCm * 0.01;
+  const ceilingM = CARE_ROOM_PRESET.ceilingHeightCm * 0.01;
+
+  const outerLayout = computeWallDimensionLayout(wallThickM, false, 420, 0);
+  assert.ok(outerLayout.spanOffsetM >= wallThickM + 0.45);
+  assert.ok(outerLayout.badgeY - outerLayout.badgeHeightM * 0.5 > outerLayout.yLineM);
+
+  const shortOddLayout = computeWallDimensionLayout(wallThickM, false, 62, 1);
+  assert.ok(shortOddLayout.badgeY > outerLayout.badgeY);
+
+  const ceilRuler = computeCeilingRulerPosition(
+    solved.polygonPoints,
+    solved.solvedEdges,
+    wallThickM,
+    ceilingM
+  )!;
+  assert.ok(ceilRuler.x < 0 && ceilRuler.z < 0);
+
+  const doorPlacement = placements.find((p) => p.element.kind === 'door')!;
+  const openingPos = computeOpeningBadgePosition(
+    doorPlacement.center,
+    doorPlacement.edge,
+    wallThickM,
+    ceilingM
+  );
+  // Bottom of opening badge must clear the top of the wall so wall headers never clip it under depthTest
+  assert.ok(openingPos.y - openingPos.badgeHeightM * 0.5 > ceilingM);
+  assert.ok(openingPos.leaderBottomY > ceilingM);
+});
+
+test('collaborative sharing helpers default legacy shares to editor and resolve newer shared edits for owner', () => {
+  assert.equal(normalizeShareAccessLevel(undefined), 'editor');
+  assert.equal(normalizeShareAccessLevel(null), 'editor');
+  assert.equal(normalizeShareAccessLevel('editor'), 'editor');
+  assert.equal(normalizeShareAccessLevel('viewer'), 'viewer');
+
+  const ownSnap = {
+    project: { ...CARE_ROOM_PRESET, projectName: 'Old Owner Copy' },
+    summary: { areaSqMeters: 20.16, areaPing: 6.1, edgeCount: 4, elementCount: 4 },
+    updatedAtMs: 10000,
+  };
+  const newerShareSnap = {
+    project: { ...CARE_ROOM_PRESET, projectName: 'Collaborator Edited Copy' },
+    summary: { areaSqMeters: 21.5, areaPing: 6.5, edgeCount: 4, elementCount: 5 },
+    updatedAtMs: 15000,
+    lastEditedByEmail: 'jason2134@gmail.com',
+    lastEditedByName: 'jason2134@gmail.com',
+  };
+
+  const resolvedNewer = resolveLatestFloorplanForOwner(ownSnap, newerShareSnap);
+  assert.equal(resolvedNewer.useSharedVersion, true);
+  assert.equal(resolvedNewer.project.projectName, 'Collaborator Edited Copy');
+  assert.equal(resolvedNewer.editedByLabel, 'jason2134@gmail.com');
+
+  const olderShareSnap = { ...newerShareSnap, updatedAtMs: 10500 };
+  const resolvedOwn = resolveLatestFloorplanForOwner(ownSnap, olderShareSnap);
+  assert.equal(resolvedOwn.useSharedVersion, false);
+  assert.equal(resolvedOwn.project.projectName, 'Old Owner Copy');
+});
+
+
 

@@ -37,9 +37,15 @@ import {
   subscribeSharedWithMeFloorplans,
   subscribeUserFloorplans,
   updateCloudFloorplan,
+  updateSharedAccessLevel,
+  updateSharedFloorplanByCollaborator,
   type CloudFloorplanRecord,
   type SharedCloudFloorplanRecord,
 } from './services/cloudFloorplans';
+import {
+  resolveLatestFloorplanForOwner,
+  type ShareAccessLevel,
+} from './utils/cloudShareHelpers';
 import { CloudStorageModal } from './components/CloudStorageModal';
 import { ElementDimensionsModal } from './components/ElementDimensionsModal';
 import { ElevationCanvas } from './components/ElevationCanvas';
@@ -185,6 +191,7 @@ export default function App() {
   const [isLoadingCloud, setIsLoadingCloud] = useState(false);
   const [cloudError, setCloudError] = useState<string | null>(null);
   const [activeCloudId, setActiveCloudId] = useState<string | null>(null);
+  const [activeSharedId, setActiveSharedId] = useState<string | null>(null);
 
   const canvas2DRef = useRef<Floorplan2DHandle | null>(null);
   const canvas3DRef = useRef<Floorplan3DHandle | null>(null);
@@ -279,6 +286,7 @@ export default function App() {
         setMySharedRecords([]);
         setSharedWithMeRecords([]);
         setActiveCloudId(null);
+        setActiveSharedId(null);
         setCloudError(null);
         setIsLoadingCloud(false);
       } else if (nextUser.emailVerified) {
@@ -290,6 +298,7 @@ export default function App() {
         setMySharedRecords([]);
         setSharedWithMeRecords([]);
         setActiveCloudId(null);
+        setActiveSharedId(null);
         setCloudError(null);
         setIsLoadingCloud(false);
       }
@@ -429,8 +438,9 @@ export default function App() {
       const newId = await saveNewCloudFloorplan(user.uid, nextProject, nextSolved);
       setProject(nextProject);
       setActiveCloudId(newId);
+      setActiveSharedId(null);
     },
-    [user, project]
+    [user, project, setProject]
   );
 
   const handleUpdateCloud = useCallback(
@@ -440,28 +450,55 @@ export default function App() {
         ? { ...project, projectName: titleOverride }
         : project;
       const nextSolved = solveFloorplan(nextProject);
+      const hasActiveShare = mySharedRecords.some((s) => s.sourcePlanId === activeCloudId);
       await updateCloudFloorplan(
         user.uid,
         activeCloudId,
         nextProject,
         nextSolved,
-        user.displayName || user.email
+        user.displayName || user.email,
+        hasActiveShare,
+        user.email
       );
       setProject(nextProject);
     },
-    [user, activeCloudId, project]
+    [user, activeCloudId, project, mySharedRecords, setProject]
+  );
+
+  const handleUpdateSharedCollaborator = useCallback(
+    async (titleOverride?: string) => {
+      if (!user || !activeSharedId) throw new Error('沒有連結中的共同編輯專案。');
+      const targetShare = sharedWithMeRecords.find((r) => r.id === activeSharedId);
+      if (!targetShare) throw new Error('找不到此共用專案，可能已被擁有者移除權限。');
+      if (targetShare.accessLevel !== 'editor') {
+        throw new Error('擁有者目前設定此專案為「僅供檢視」，無法同步寫入。');
+      }
+      const nextProject: FloorplanProject = titleOverride
+        ? { ...project, projectName: titleOverride }
+        : project;
+      const nextSolved = solveFloorplan(nextProject);
+      await updateSharedFloorplanByCollaborator(user, targetShare, nextProject, nextSolved);
+      setProject(nextProject);
+    },
+    [user, activeSharedId, sharedWithMeRecords, project, setProject]
   );
 
   const handleLoadCloudRecord = useCallback((record: CloudFloorplanRecord) => {
+    const shareRec = mySharedRecords.find((s) => s.sourcePlanId === record.id);
+    const latest = resolveLatestFloorplanForOwner(record, shareRec);
     setAnalyzeError(null);
     setSelectedEdgeId(null);
     setSelectedElementId(null);
-    setSelectedSectionId(record.project.sectionLines?.[0]?.id ?? null);
+    setSelectedSectionId(latest.project.sectionLines?.[0]?.id ?? null);
     setSectionDrawMode(false);
-    setProject(record.project);
+    setProject(latest.project);
     setActiveCloudId(record.id);
+    setActiveSharedId(null);
     setMobilePanel('canvas');
-  }, [setProject]);
+    if (latest.useSharedVersion) {
+      showToast(`已載入最新共同編輯版本（由 ${latest.editedByLabel} 更新）`);
+    }
+  }, [mySharedRecords, setProject, showToast]);
 
   const handleLoadSharedRecord = useCallback((record: SharedCloudFloorplanRecord) => {
     setAnalyzeError(null);
@@ -471,16 +508,36 @@ export default function App() {
     setSectionDrawMode(false);
     setProject(record.project);
     setActiveCloudId(null);
+    setActiveSharedId(record.id);
     setMobilePanel('canvas');
-    showToast(`已載入共用專案「${record.project.projectName}」（如需保留修改請另存至個人雲端）`);
+    if (record.accessLevel === 'editor') {
+      showToast(`已載入共同編輯專案「${record.project.projectName}」，修改後可於雲端專案庫同步更新`);
+    } else {
+      showToast(`已載入唯讀共用專案「${record.project.projectName}」（如需保留修改請另存至個人雲端）`);
+    }
   }, [setProject, showToast]);
 
   const handleShareCloudRecords = useCallback(
-    async (recordsToShare: CloudFloorplanRecord[], recipientEmails: string[]) => {
+    async (
+      recordsToShare: CloudFloorplanRecord[],
+      recipientEmails: string[],
+      accessLevel: ShareAccessLevel
+    ) => {
       if (!user) throw new Error('請先登入帳號。');
+      const shareMap = new Map(mySharedRecords.map((s) => [s.sourcePlanId, s]));
       await Promise.all(
-        recordsToShare.map((rec) => shareCloudFloorplanWithEmails(user, rec, recipientEmails))
+        recordsToShare.map((rec) =>
+          shareCloudFloorplanWithEmails(user, rec, recipientEmails, shareMap.get(rec.id), accessLevel)
+        )
       );
+    },
+    [user, mySharedRecords]
+  );
+
+  const handleToggleShareAccessLevel = useCallback(
+    async (shareRecord: SharedCloudFloorplanRecord, nextLevel: ShareAccessLevel) => {
+      if (!user) throw new Error('請先登入帳號。');
+      await updateSharedAccessLevel(shareRecord, nextLevel);
     },
     [user]
   );
@@ -496,12 +553,13 @@ export default function App() {
   const handleDeleteCloudRecord = useCallback(
     async (record: CloudFloorplanRecord) => {
       if (!user) return;
-      await deleteCloudFloorplan(user.uid, record.id);
+      const hasActiveShare = mySharedRecords.some((s) => s.sourcePlanId === record.id);
+      await deleteCloudFloorplan(user.uid, record.id, hasActiveShare);
       if (activeCloudId === record.id) {
         setActiveCloudId(null);
       }
     },
-    [user, activeCloudId]
+    [user, activeCloudId, mySharedRecords]
   );
 
   const handleAutoClose = useCallback(() => {
@@ -516,6 +574,7 @@ export default function App() {
       setSelectedSectionId(null);
       setSectionDrawMode(false);
       setActiveCloudId(null);
+      setActiveSharedId(null);
       if (preset === 'care-room') {
         setProject(CARE_ROOM_PRESET);
       } else if (preset === 'l-studio') {
@@ -1347,6 +1406,7 @@ export default function App() {
             currentProject={project}
             currentSolved={solved}
             activeCloudId={activeCloudId}
+            activeSharedId={activeSharedId}
             records={cloudRecords}
             mySharedRecords={mySharedRecords}
             sharedWithMeRecords={sharedWithMeRecords}
@@ -1354,9 +1414,11 @@ export default function App() {
             cloudError={cloudError}
             onSaveNew={handleSaveNewCloud}
             onUpdateExisting={handleUpdateCloud}
+            onUpdateShared={handleUpdateSharedCollaborator}
             onLoadRecord={handleLoadCloudRecord}
             onLoadSharedRecord={handleLoadSharedRecord}
             onShareRecords={handleShareCloudRecords}
+            onToggleShareAccessLevel={handleToggleShareAccessLevel}
             onRevokeShareEmail={handleRevokeShareEmail}
             onDeleteRecord={handleDeleteCloudRecord}
           />

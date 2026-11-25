@@ -24,7 +24,11 @@ import type {
   CloudFloorplanRecord,
   SharedCloudFloorplanRecord,
 } from '../services/cloudFloorplans';
-import { parseShareEmailsInput } from '../utils/cloudShareHelpers';
+import {
+  parseShareEmailsInput,
+  resolveLatestFloorplanForOwner,
+  type ShareAccessLevel,
+} from '../utils/cloudShareHelpers';
 
 interface CloudStorageModalProps {
   isOpen: boolean;
@@ -41,6 +45,7 @@ interface CloudStorageModalProps {
   currentProject: FloorplanProject;
   currentSolved: SolvedFloorplan;
   activeCloudId: string | null;
+  activeSharedId: string | null;
   records: CloudFloorplanRecord[];
   mySharedRecords: SharedCloudFloorplanRecord[];
   sharedWithMeRecords: SharedCloudFloorplanRecord[];
@@ -48,9 +53,18 @@ interface CloudStorageModalProps {
   cloudError: string | null;
   onSaveNew: (titleOverride?: string) => Promise<void>;
   onUpdateExisting: (titleOverride?: string) => Promise<void>;
+  onUpdateShared: (titleOverride?: string) => Promise<void>;
   onLoadRecord: (record: CloudFloorplanRecord) => void;
   onLoadSharedRecord: (record: SharedCloudFloorplanRecord) => void;
-  onShareRecords: (records: CloudFloorplanRecord[], emails: string[]) => Promise<void>;
+  onShareRecords: (
+    records: CloudFloorplanRecord[],
+    emails: string[],
+    accessLevel: ShareAccessLevel
+  ) => Promise<void>;
+  onToggleShareAccessLevel: (
+    shareRecord: SharedCloudFloorplanRecord,
+    nextLevel: ShareAccessLevel
+  ) => Promise<void>;
   onRevokeShareEmail: (shareRecord: SharedCloudFloorplanRecord, email: string) => Promise<void>;
   onDeleteRecord: (record: CloudFloorplanRecord) => Promise<void>;
 }
@@ -85,6 +99,7 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
   currentProject,
   currentSolved,
   activeCloudId,
+  activeSharedId,
   records,
   mySharedRecords,
   sharedWithMeRecords,
@@ -92,9 +107,11 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
   cloudError,
   onSaveNew,
   onUpdateExisting,
+  onUpdateShared,
   onLoadRecord,
   onLoadSharedRecord,
   onShareRecords,
+  onToggleShareAccessLevel,
   onRevokeShareEmail,
   onDeleteRecord,
 }) => {
@@ -106,6 +123,7 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
   const [actionError, setActionError] = useState<string | null>(null);
 
   const [shareEmailsDraft, setShareEmailsDraft] = useState('');
+  const [shareAccessLevelDraft, setShareAccessLevelDraft] = useState<ShareAccessLevel>('editor');
   const [isSharingBusy, setIsSharingBusy] = useState(false);
   const shareInputRef = React.useRef<HTMLInputElement | null>(null);
 
@@ -153,13 +171,35 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
     setActionError(null);
     setStatusMessage(null);
     try {
-      await onShareRecords(targetRecords, parsed.validEmails);
+      await onShareRecords(targetRecords, parsed.validEmails, shareAccessLevelDraft);
+      const modeText = shareAccessLevelDraft === 'editor' ? '可共同編輯' : '僅供檢視';
       setStatusMessage(
-        `${successLabel}給 ${parsed.validEmails.join('、')}！對方使用該 Email 登入即可讀取。`
+        `${successLabel}給 ${parsed.validEmails.join('、')}（${modeText}）！對方登入後即可在「他人共用給我的專案」中存取。`
       );
       setShareEmailsDraft('');
     } catch (err) {
       setActionError(err instanceof Error ? err.message : '雲端分享失敗，請稍後再試。');
+    } finally {
+      setIsSharingBusy(false);
+    }
+  };
+
+  const handleToggleShareLevelClick = async (
+    shareRecord: SharedCloudFloorplanRecord,
+    nextLevel: ShareAccessLevel
+  ) => {
+    setIsSharingBusy(true);
+    setActionError(null);
+    setStatusMessage(null);
+    try {
+      await onToggleShareAccessLevel(shareRecord, nextLevel);
+      setStatusMessage(
+        `已將「${shareRecord.project.projectName}」切換為「${
+          nextLevel === 'editor' ? '可共同編輯' : '僅供檢視'
+        }」。`
+      );
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : '切換共用權限失敗，請稍後再試。');
     } finally {
       setIsSharingBusy(false);
     }
@@ -270,6 +310,11 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
     [records, activeCloudId]
   );
 
+  const activeSharedRecord = useMemo(
+    () => (activeSharedId ? sharedWithMeRecords.find((r) => r.id === activeSharedId) ?? null : null),
+    [sharedWithMeRecords, activeSharedId]
+  );
+
   if (!isOpen) return null;
 
   const handleSaveNewClick = async () => {
@@ -305,6 +350,25 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
       setStatusMessage(`已同步更新雲端專案「${trimmed}」。`);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : '雲端更新失敗，請稍後再試。');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleUpdateSharedClick = async () => {
+    const trimmed = titleDraft.trim();
+    if (!trimmed) {
+      setActionError('請輸入專案名稱後再同步更新。');
+      return;
+    }
+    setIsSaving(true);
+    setActionError(null);
+    setStatusMessage(null);
+    try {
+      await onUpdateShared(trimmed);
+      setStatusMessage(`已同步更新共同編輯專案「${trimmed}」，擁有者及其他成員皆可看見最新內容！`);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : '同步更新共用專案失敗，請稍後再試。');
     } finally {
       setIsSaving(false);
     }
@@ -608,24 +672,55 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
                     </button>
                   )}
 
+                  {!activeRecord && activeSharedRecord && activeSharedRecord.accessLevel === 'editor' && (
+                    <button
+                      type="button"
+                      disabled={isSaving}
+                      onClick={handleUpdateSharedClick}
+                      className="flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isSaving ? 'animate-spin' : ''}`} />
+                      <span>同步更新共用專案</span>
+                    </button>
+                  )}
+
                   <button
                     type="button"
                     disabled={isSaving}
                     onClick={handleSaveNewClick}
                     className={`flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 ${
-                      activeRecord
+                      activeRecord || (activeSharedRecord && activeSharedRecord.accessLevel === 'editor')
                         ? 'bg-slate-100 text-slate-800 hover:bg-slate-200'
                         : 'bg-slate-900 text-white hover:bg-slate-800'
                     }`}
                   >
                     <CloudUpload className="w-3.5 h-3.5" />
-                    <span>{activeRecord ? '另存為新專案' : '儲存至雲端'}</span>
+                    <span>
+                      {activeRecord
+                        ? '另存為新專案'
+                        : activeSharedRecord
+                        ? '另存至我的雲端'
+                        : '儲存至雲端'}
+                    </span>
                   </button>
                 </div>
 
                 {activeRecord && (
                   <p className="text-[11px] text-blue-700">
                     目前畫布已連結至雲端專案：「{activeRecord.project.projectName}」
+                  </p>
+                )}
+                {!activeRecord && activeSharedRecord && (
+                  <p
+                    className={`text-[11px] ${
+                      activeSharedRecord.accessLevel === 'editor'
+                        ? 'text-emerald-700'
+                        : 'text-amber-700'
+                    }`}
+                  >
+                    {activeSharedRecord.accessLevel === 'editor'
+                      ? `目前畫布已連結至共同編輯專案：「${activeSharedRecord.project.projectName}」（來自 ${activeSharedRecord.ownerDisplayName}），點擊「同步更新共用專案」即可儲存變更。`
+                      : `目前檢視唯讀共用專案：「${activeSharedRecord.project.projectName}」（擁有者設定為僅檢視，若要保留修改可點擊「另存至我的雲端」）。`}
                   </p>
                 )}
               </div>
@@ -652,11 +747,39 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
 
                 {/* Cross-Account Sharing Bar */}
                 {records.length > 0 && (
-                  <div className="p-3 rounded-xl border border-blue-200 bg-blue-50/50 space-y-2">
-                    <div className="flex items-center gap-1.5 text-xs font-semibold text-blue-950">
-                      <Users className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-                      <span>開放其他帳號讀取雲端專案</span>
+                  <div className="p-3 rounded-xl border border-blue-200 bg-blue-50/50 space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 text-xs font-semibold text-blue-950">
+                        <Users className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                        <span>共用雲端專案給其他帳號</span>
+                      </div>
+
+                      <div className="inline-flex rounded-lg bg-white border border-blue-200 p-0.5 text-[11px]">
+                        <button
+                          type="button"
+                          onClick={() => setShareAccessLevelDraft('editor')}
+                          className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
+                            shareAccessLevelDraft === 'editor'
+                              ? 'bg-blue-600 text-white'
+                              : 'text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          可共同編輯
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setShareAccessLevelDraft('viewer')}
+                          className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
+                            shareAccessLevelDraft === 'viewer'
+                              ? 'bg-slate-800 text-white'
+                              : 'text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          僅供檢視
+                        </button>
+                      </div>
                     </div>
+
                     <div className="flex flex-col sm:flex-row gap-2">
                       <input
                         ref={shareInputRef}
@@ -713,6 +836,7 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
                     {filteredRecords.map((rec) => {
                       const isActive = rec.id === activeCloudId;
                       const shareRec = myShareByPlanId.get(rec.id);
+                      const latest = resolveLatestFloorplanForOwner(rec, shareRec);
                       return (
                         <div
                           key={rec.id}
@@ -724,26 +848,31 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
                         >
                           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                             <div className="min-w-0 space-y-1">
-                              <div className="flex items-center gap-2">
+                              <div className="flex flex-wrap items-center gap-2">
                                 <p className="text-sm font-semibold text-slate-900 truncate">
-                                  {rec.project.projectName}
+                                  {latest.project.projectName}
                                 </p>
                                 {isActive && (
                                   <span className="text-[11px] font-semibold text-blue-700 shrink-0">
                                     目前編輯中
                                   </span>
                                 )}
+                                {latest.useSharedVersion && (
+                                  <span className="text-[11px] font-semibold text-emerald-700 shrink-0">
+                                    協作者已更新（{latest.editedByLabel}）
+                                  </span>
+                                )}
                               </div>
                               <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-xs text-slate-500 tabular-nums">
                                 <span>
-                                  {rec.summary.areaSqMeters.toFixed(2)} m² ({rec.summary.areaPing.toFixed(2)} 坪)
+                                  {latest.summary.areaSqMeters.toFixed(2)} m² ({latest.summary.areaPing.toFixed(2)} 坪)
                                 </span>
                                 <span aria-hidden="true">·</span>
-                                <span>{rec.summary.edgeCount} 段牆壁</span>
+                                <span>{latest.summary.edgeCount} 段牆壁</span>
                                 <span aria-hidden="true">·</span>
-                                <span>{rec.summary.elementCount} 個元件</span>
+                                <span>{latest.summary.elementCount} 個元件</span>
                                 <span aria-hidden="true">·</span>
-                                <span>更新於 {formatUpdatedAt(rec.updatedAtMs)}</span>
+                                <span>更新於 {formatUpdatedAt(latest.updatedAtMs)}</span>
                               </div>
                             </div>
 
@@ -754,7 +883,7 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
                                 onClick={() =>
                                   handleShareTargetRecords(
                                     [rec],
-                                    `已將「${rec.project.projectName}」共用`
+                                    `已將「${latest.project.projectName}」共用`
                                   )
                                 }
                                 title="使用上方輸入的 Email 共用此專案"
@@ -793,26 +922,49 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
                           </div>
 
                           {shareRec && shareRec.sharedWithEmails.length > 0 && (
-                            <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-600">
-                              <span className="font-medium text-slate-500">已共用給：</span>
-                              {shareRec.sharedWithEmails.map((email) => (
-                                <span
-                                  key={email}
-                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200"
-                                >
-                                  <span>{email}</span>
-                                  <button
-                                    type="button"
-                                    disabled={isSharingBusy}
-                                    onClick={() => handleRevokeEmailClick(shareRec, email)}
-                                    aria-label={`取消共用給 ${email}`}
-                                    title={`取消共用給 ${email}`}
-                                    className="text-slate-400 hover:text-red-600 disabled:opacity-40"
+                            <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-600">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="font-medium text-slate-500">已共用給：</span>
+                                {shareRec.sharedWithEmails.map((email) => (
+                                  <span
+                                    key={email}
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200"
                                   >
-                                    <X className="w-3 h-3" />
-                                  </button>
-                                </span>
-                              ))}
+                                    <span>{email}</span>
+                                    <button
+                                      type="button"
+                                      disabled={isSharingBusy}
+                                      onClick={() => handleRevokeEmailClick(shareRec, email)}
+                                      aria-label={`取消共用給 ${email}`}
+                                      title={`取消共用給 ${email}`}
+                                      className="text-slate-400 hover:text-red-600 disabled:opacity-40"
+                                    >
+                                      <X className="w-3 h-3" />
+                                    </button>
+                                  </span>
+                                ))}
+                              </div>
+
+                              <button
+                                type="button"
+                                disabled={isSharingBusy}
+                                onClick={() =>
+                                  handleToggleShareLevelClick(
+                                    shareRec,
+                                    shareRec.accessLevel === 'editor' ? 'viewer' : 'editor'
+                                  )
+                                }
+                                className={`px-2 py-0.5 rounded-md font-semibold border transition-colors whitespace-nowrap shrink-0 disabled:opacity-50 ${
+                                  shareRec.accessLevel === 'editor'
+                                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
+                                    : 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200'
+                                }`}
+                                title="點擊切換對方的共用權限"
+                              >
+                                {shareRec.accessLevel === 'editor'
+                                  ? '權限：可共同編輯（點擊切僅檢視）'
+                                  : '權限：僅供檢視（點擊開放編輯）'}
+                              </button>
                             </div>
                           )}
                         </div>
@@ -842,46 +994,74 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {sharedWithMeRecords.map((rec) => (
-                      <div
-                        key={rec.id}
-                        className="p-3.5 rounded-xl border border-emerald-200 bg-emerald-50/30 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
-                      >
-                        <div className="min-w-0 space-y-1">
-                          <div className="flex items-center gap-2">
-                            <p className="text-sm font-semibold text-slate-900 truncate">
-                              {rec.project.projectName}
-                            </p>
-                            <span className="text-[11px] font-medium text-emerald-700 shrink-0">
-                              來自 {rec.ownerDisplayName || '團隊共用'} · 唯讀共用
-                            </span>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-xs text-slate-500 tabular-nums">
-                            <span>
-                              {rec.summary.areaSqMeters.toFixed(2)} m² ({rec.summary.areaPing.toFixed(2)} 坪)
-                            </span>
-                            <span aria-hidden="true">·</span>
-                            <span>{rec.summary.edgeCount} 段牆壁</span>
-                            <span aria-hidden="true">·</span>
-                            <span>{rec.summary.elementCount} 個元件</span>
-                            <span aria-hidden="true">·</span>
-                            <span>同步於 {formatUpdatedAt(rec.updatedAtMs)}</span>
-                          </div>
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={() => {
-                            onLoadSharedRecord(rec);
-                            onClose();
-                          }}
-                          className="flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-700 text-white hover:bg-emerald-800 transition-colors whitespace-nowrap shrink-0"
+                    {sharedWithMeRecords.map((rec) => {
+                      const isEditable = rec.accessLevel === 'editor';
+                      const isCurrentShared = rec.id === activeSharedId;
+                      return (
+                        <div
+                          key={rec.id}
+                          className={`p-3.5 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors ${
+                            isCurrentShared
+                              ? 'border-emerald-500 bg-emerald-50/60'
+                              : isEditable
+                              ? 'border-emerald-200 bg-emerald-50/30'
+                              : 'border-slate-200 bg-slate-50/50'
+                          }`}
                         >
-                          <FolderOpen className="w-3.5 h-3.5" />
-                          <span>載入檢視 / 複製</span>
-                        </button>
-                      </div>
-                    ))}
+                          <div className="min-w-0 space-y-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <p className="text-sm font-semibold text-slate-900 truncate">
+                                {rec.project.projectName}
+                              </p>
+                              <span
+                                className={`text-[11px] font-semibold shrink-0 ${
+                                  isEditable ? 'text-emerald-700' : 'text-slate-600'
+                                }`}
+                              >
+                                來自 {rec.ownerDisplayName || '團隊共用'} ·{' '}
+                                {isEditable ? '可共同編輯' : '僅供檢視'}
+                              </span>
+                              {isCurrentShared && (
+                                <span className="text-[11px] font-semibold text-blue-700 shrink-0">
+                                  目前編輯中
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-xs text-slate-500 tabular-nums">
+                              <span>
+                                {rec.summary.areaSqMeters.toFixed(2)} m² ({rec.summary.areaPing.toFixed(2)} 坪)
+                              </span>
+                              <span aria-hidden="true">·</span>
+                              <span>{rec.summary.edgeCount} 段牆壁</span>
+                              <span aria-hidden="true">·</span>
+                              <span>{rec.summary.elementCount} 個元件</span>
+                              <span aria-hidden="true">·</span>
+                              <span>
+                                {rec.lastEditedByName
+                                  ? `由 ${rec.lastEditedByName} 同步於 ${formatUpdatedAt(rec.updatedAtMs)}`
+                                  : `同步於 ${formatUpdatedAt(rec.updatedAtMs)}`}
+                              </span>
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onLoadSharedRecord(rec);
+                              onClose();
+                            }}
+                            className={`flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white transition-colors whitespace-nowrap shrink-0 ${
+                              isEditable
+                                ? 'bg-emerald-700 hover:bg-emerald-800'
+                                : 'bg-slate-700 hover:bg-slate-800'
+                            }`}
+                          >
+                            <FolderOpen className="w-3.5 h-3.5" />
+                            <span>{isEditable ? '載入共同編輯' : '載入檢視 / 複製'}</span>
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>

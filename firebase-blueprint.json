@@ -122,7 +122,7 @@
     },
     "SharedFloorplanDocument": {
       "title": "SharedFloorplanDocument",
-      "description": "Email-shared snapshot of a user-owned floorplan project readable by authorized recipients.",
+      "description": "Email-shared floorplan document accessible to the owner and listed verified recipient emails with configurable editor or viewer access.",
       "type": "object",
       "properties": {
         "ownerId": {
@@ -147,6 +147,21 @@
         "sharedWithEmails": {
           "type": "array",
           "description": "Authorized recipient email addresses in lowercase (1 to 20)"
+        },
+        "accessLevel": {
+          "type": "string",
+          "enum": ["editor", "viewer"],
+          "description": "Recipient permission level (defaults to editor when omitted on legacy shares)"
+        },
+        "lastEditedByEmail": {
+          "type": "string",
+          "description": "Email of the last authenticated user who updated the shared floorplan",
+          "maxLength": 120
+        },
+        "lastEditedByName": {
+          "type": "string",
+          "description": "Display name of the last authenticated user who updated the shared floorplan",
+          "maxLength": 120
         },
         "projectName": {
           "type": "string",
@@ -251,7 +266,7 @@
       "schema": {
         "$ref": "#/entities/SharedFloorplanDocument"
       },
-      "description": "Email-shared floorplan snapshots accessible to the owner and listed verified recipient emails."
+      "description": "Email-shared floorplan documents accessible to the owner and listed verified recipient emails (editor or viewer)."
     }
   }
 }

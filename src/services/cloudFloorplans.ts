@@ -28,7 +28,10 @@ import {
   buildShareDocId,
   mergeShareEmailLists,
   normalizeEmailAddress,
+  normalizeShareAccessLevel,
   removeShareEmail,
+  resolveLatestFloorplanForOwner,
+  type ShareAccessLevel,
 } from '../utils/cloudShareHelpers';
 
 export interface CloudFloorplanRecord {
@@ -49,6 +52,9 @@ export interface SharedCloudFloorplanRecord extends CloudFloorplanRecord {
   ownerDisplayName: string;
   sourcePlanId: string;
   sharedWithEmails: string[];
+  accessLevel: ShareAccessLevel;
+  lastEditedByEmail?: string;
+  lastEditedByName?: string;
 }
 
 function clampString(val: unknown, fallback: string, maxLen: number): string {
@@ -304,6 +310,9 @@ export function subscribeMySharedFloorplans(
           sharedWithEmails: Array.isArray(d.sharedWithEmails)
             ? d.sharedWithEmails.filter((e): e is string => typeof e === 'string')
             : [],
+          accessLevel: normalizeShareAccessLevel(d.accessLevel),
+          ...(typeof d.lastEditedByEmail === 'string' ? { lastEditedByEmail: d.lastEditedByEmail } : {}),
+          ...(typeof d.lastEditedByName === 'string' ? { lastEditedByName: d.lastEditedByName } : {}),
         };
       });
       records.sort((a, b) => b.updatedAtMs - a.updatedAtMs);
@@ -345,6 +354,9 @@ export function subscribeSharedWithMeFloorplans(
           sharedWithEmails: Array.isArray(d.sharedWithEmails)
             ? d.sharedWithEmails.filter((e): e is string => typeof e === 'string')
             : [],
+          accessLevel: normalizeShareAccessLevel(d.accessLevel),
+          ...(typeof d.lastEditedByEmail === 'string' ? { lastEditedByEmail: d.lastEditedByEmail } : {}),
+          ...(typeof d.lastEditedByName === 'string' ? { lastEditedByName: d.lastEditedByName } : {}),
         };
       });
       records.sort((a, b) => b.updatedAtMs - a.updatedAtMs);
@@ -381,7 +393,9 @@ export async function updateCloudFloorplan(
   planId: string,
   project: FloorplanProject,
   solved: SolvedFloorplan,
-  ownerDisplayName?: string | null
+  ownerDisplayName?: string | null,
+  hasActiveShare?: boolean,
+  ownerEmail?: string | null
 ): Promise<void> {
   const docPath = `users/${userId}/floorplans/${planId}`;
   try {
@@ -391,25 +405,78 @@ export async function updateCloudFloorplan(
     handleFirestoreError(error, OperationType.UPDATE, docPath);
   }
 
-  // Keep any active shared snapshot in sync when the owner updates the source plan
+  if (!hasActiveShare) return;
+
+  // Keep active shared document in sync when the owner updates the source plan
   const shareId = buildShareDocId(userId, planId);
   const sharePath = `shared_floorplans/${shareId}`;
   try {
     const shareRef = doc(db, 'shared_floorplans', shareId);
-    const shareSnap = await getDoc(shareRef);
-    if (shareSnap.exists()) {
-      const updateBody = buildFloorplanBodyPayload(project, solved);
-      if (ownerDisplayName && ownerDisplayName.trim()) {
-        updateBody.ownerDisplayName = ownerDisplayName.trim().slice(0, 120);
-      }
-      await updateDoc(shareRef, updateBody);
+    const updateBody = buildFloorplanBodyPayload(project, solved);
+    if (ownerDisplayName && ownerDisplayName.trim()) {
+      updateBody.ownerDisplayName = ownerDisplayName.trim().slice(0, 120);
+      updateBody.lastEditedByName = ownerDisplayName.trim().slice(0, 120);
     }
+    if (ownerEmail && ownerEmail.trim()) {
+      updateBody.lastEditedByEmail = normalizeEmailAddress(ownerEmail).slice(0, 120);
+    }
+    await updateDoc(shareRef, updateBody);
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, sharePath);
   }
 }
 
-export async function deleteCloudFloorplan(userId: string, planId: string): Promise<void> {
+export async function updateSharedFloorplanByCollaborator(
+  user: User,
+  shareRecord: SharedCloudFloorplanRecord,
+  project: FloorplanProject,
+  solved: SolvedFloorplan
+): Promise<void> {
+  const sharePath = `shared_floorplans/${shareRecord.id}`;
+  const shareRef = doc(db, 'shared_floorplans', shareRecord.id);
+  const editorEmail = normalizeEmailAddress(user.email || '');
+  if (!editorEmail) {
+    throw new Error('需要已驗證的 Email 帳號才能同步更新共用專案。');
+  }
+  const editorName = clampString(
+    user.displayName || editorEmail,
+    editorEmail,
+    120
+  );
+
+  try {
+    const payload: Record<string, unknown> = {
+      ...buildFloorplanBodyPayload(project, solved),
+      lastEditedByEmail: editorEmail.slice(0, 120),
+      lastEditedByName: editorName,
+    };
+    await updateDoc(shareRef, payload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, sharePath);
+  }
+}
+
+export async function updateSharedAccessLevel(
+  shareRecord: SharedCloudFloorplanRecord,
+  accessLevel: ShareAccessLevel
+): Promise<void> {
+  const sharePath = `shared_floorplans/${shareRecord.id}`;
+  const shareRef = doc(db, 'shared_floorplans', shareRecord.id);
+  try {
+    await updateDoc(shareRef, {
+      accessLevel,
+      updatedAt: serverTimestamp(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, sharePath);
+  }
+}
+
+export async function deleteCloudFloorplan(
+  userId: string,
+  planId: string,
+  hasActiveShare?: boolean
+): Promise<void> {
   const docPath = `users/${userId}/floorplans/${planId}`;
   try {
     await deleteDoc(doc(db, 'users', userId, 'floorplans', planId));
@@ -417,15 +484,14 @@ export async function deleteCloudFloorplan(userId: string, planId: string): Prom
     handleFirestoreError(error, OperationType.DELETE, docPath);
   }
 
-  // Clean up any shared snapshot for this deleted project
+  if (!hasActiveShare) return;
+
+  // Clean up active shared snapshot for this deleted project
   const shareId = buildShareDocId(userId, planId);
   const sharePath = `shared_floorplans/${shareId}`;
   try {
     const shareRef = doc(db, 'shared_floorplans', shareId);
-    const shareSnap = await getDoc(shareRef);
-    if (shareSnap.exists()) {
-      await deleteDoc(shareRef);
-    }
+    await deleteDoc(shareRef);
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, sharePath);
   }
@@ -434,16 +500,55 @@ export async function deleteCloudFloorplan(userId: string, planId: string): Prom
 export async function shareCloudFloorplanWithEmails(
   user: User,
   record: CloudFloorplanRecord,
-  recipientEmails: string[]
+  recipientEmails: string[],
+  existingShare?: SharedCloudFloorplanRecord,
+  accessLevel: ShareAccessLevel = 'editor'
 ): Promise<void> {
   const shareId = buildShareDocId(user.uid, record.id);
   const sharePath = `shared_floorplans/${shareId}`;
   const shareRef = doc(db, 'shared_floorplans', shareId);
   const ownerDisplay = (user.displayName || user.email || '雲端空間擁有者').trim().slice(0, 120);
+  const ownerEmail = user.email ? normalizeEmailAddress(user.email).slice(0, 120) : '';
+
+  const latest = resolveLatestFloorplanForOwner(record, existingShare);
 
   try {
-    const existingSnap = await getDoc(shareRef);
-    if (existingSnap.exists()) {
+    if (existingShare) {
+      const mergedEmails = mergeShareEmailLists(existingShare.sharedWithEmails, recipientEmails);
+      if (mergedEmails.length === 0) return;
+
+      const updatePayload: Record<string, unknown> = {
+        ...buildFloorplanBodyPayload(latest.project, latest.summary),
+        sharedWithEmails: mergedEmails,
+        accessLevel,
+        ownerDisplayName: ownerDisplay,
+      };
+      await updateDoc(shareRef, updatePayload);
+      return;
+    }
+
+    const initialEmails = mergeShareEmailLists([], recipientEmails);
+    if (initialEmails.length === 0) return;
+
+    const createPayload: Record<string, unknown> = {
+      ...buildFloorplanBodyPayload(record.project, record.summary),
+      ownerId: user.uid,
+      ownerDisplayName: ownerDisplay,
+      sourcePlanId: record.id,
+      sharedWithEmails: initialEmails,
+      accessLevel,
+      ...(ownerEmail ? { lastEditedByEmail: ownerEmail, lastEditedByName: ownerDisplay } : {}),
+      createdAt: serverTimestamp(),
+    };
+
+    try {
+      await setDoc(shareRef, createPayload);
+    } catch (createErr) {
+      // Handle multi-tab race where share doc was created concurrently
+      const existingSnap = await getDoc(shareRef);
+      if (!existingSnap.exists()) {
+        throw createErr;
+      }
       const existingData = existingSnap.data() as Record<string, unknown>;
       const existingList = Array.isArray(existingData.sharedWithEmails)
         ? existingData.sharedWithEmails.filter((e): e is string => typeof e === 'string')
@@ -454,22 +559,10 @@ export async function shareCloudFloorplanWithEmails(
       const updatePayload: Record<string, unknown> = {
         ...buildFloorplanBodyPayload(record.project, record.summary),
         sharedWithEmails: mergedEmails,
+        accessLevel,
         ownerDisplayName: ownerDisplay,
       };
       await updateDoc(shareRef, updatePayload);
-    } else {
-      const initialEmails = mergeShareEmailLists([], recipientEmails);
-      if (initialEmails.length === 0) return;
-
-      const createPayload: Record<string, unknown> = {
-        ...buildFloorplanBodyPayload(record.project, record.summary),
-        ownerId: user.uid,
-        ownerDisplayName: ownerDisplay,
-        sourcePlanId: record.id,
-        sharedWithEmails: initialEmails,
-        createdAt: serverTimestamp(),
-      };
-      await setDoc(shareRef, createPayload);
     }
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, sharePath);

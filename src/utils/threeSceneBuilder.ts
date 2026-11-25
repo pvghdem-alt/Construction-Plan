@@ -7,6 +7,11 @@ import type {
   SolvedWallSegment,
 } from '../types/floorplan';
 import { formatDimension, parseDoorSwing } from './floorplanGeometry';
+import {
+  computeCeilingRulerPosition,
+  computeOpeningBadgePosition,
+  computeWallDimensionLayout,
+} from './threeDimensionLayout';
 
 export const CM_TO_M = 0.01;
 
@@ -115,12 +120,14 @@ function createDimensionBadgeSprite(
     border?: string;
     color?: string;
     heightMeters?: number;
+    depthTest?: boolean;
   } = {}
 ): THREE.Sprite {
   const bg = options.bg ?? 'rgba(255, 255, 255, 0.94)';
   const border = options.border ?? '#94a3b8';
   const color = options.color ?? '#0f172a';
   const heightM = options.heightMeters ?? 0.34;
+  const depthTest = options.depthTest ?? true;
 
   const fontPx = 30;
   const padX = 20;
@@ -159,11 +166,12 @@ function createDimensionBadgeSprite(
   const material = new THREE.SpriteMaterial({
     map: texture,
     transparent: true,
-    depthTest: false,
+    alphaTest: 0.08,
+    depthTest,
     depthWrite: false,
   });
   const sprite = new THREE.Sprite(material);
-  sprite.renderOrder = 30;
+  sprite.renderOrder = depthTest ? 10 : 30;
   const aspect = canvas.width / canvas.height;
   sprite.scale.set(heightM * aspect, heightM, 1);
   return sprite;
@@ -220,11 +228,13 @@ export function buildRoomSceneGroup(
     metalness: 0.04,
     transparent: wallTransparent,
     opacity: wallTransparent ? 0.65 : 1.0,
+    depthWrite: !wallTransparent,
   });
   const wallEdgeLineMat = new THREE.LineBasicMaterial({
     color: 0x94a3b8,
     transparent: true,
     opacity: wallTransparent ? 0.45 : 0.75,
+    depthWrite: !wallTransparent,
   });
 
   // 1. Floor Slab
@@ -274,6 +284,7 @@ export function buildRoomSceneGroup(
       const ceilMesh = new THREE.Mesh(ceilGeo, ceilMat);
       ceilMesh.rotation.x = -Math.PI / 2;
       ceilMesh.position.y = ceilingM + 0.005;
+      ceilMesh.renderOrder = 3;
       roomGroup.add(ceilMesh);
     }
   }
@@ -325,6 +336,7 @@ export function buildRoomSceneGroup(
     mesh.rotation.y = -Math.atan2(se.tangent.y, se.tangent.x);
     mesh.castShadow = !isSoftwareGl && !wallTransparent;
     mesh.receiveShadow = !isSoftwareGl;
+    if (wallTransparent) mesh.renderOrder = 2;
     roomGroup.add(mesh);
 
     if (showWireframe) {
@@ -332,6 +344,7 @@ export function buildRoomSceneGroup(
       const line = new THREE.LineSegments(edgesGeo, wallEdgeLineMat);
       line.position.copy(mesh.position);
       line.rotation.copy(mesh.rotation);
+      if (wallTransparent) line.renderOrder = 2;
       roomGroup.add(line);
     }
   };
@@ -392,6 +405,7 @@ export function buildRoomSceneGroup(
     transparent: true,
     opacity: isSoftwareGl ? 0.4 : 0.5,
     ior: 1.5,
+    depthWrite: false,
   });
   const cabPlinthMat = new THREE.MeshStandardMaterial({
     color: 0x334155,
@@ -631,6 +645,7 @@ export function buildRoomSceneGroup(
         windowGlassMat
       );
       glass.position.set(0, hM * 0.5, 0);
+      glass.renderOrder = 1;
       winGroup.add(glass);
 
       roomGroup.add(winGroup);
@@ -923,42 +938,51 @@ export function buildRoomSceneGroup(
     const dimLineMat = new THREE.LineBasicMaterial({
       color: 0x3b82f6,
       transparent: true,
-      opacity: 0.75,
+      opacity: 0.78,
+      depthTest: true,
+      depthWrite: false,
     });
     const heightLineMat = new THREE.LineBasicMaterial({
       color: 0x0f766e,
       transparent: true,
       opacity: 0.85,
+      depthTest: true,
+      depthWrite: false,
     });
 
     const dimVertices: number[] = [];
-    for (const se of [...solved.solvedEdges, ...solved.solvedInteriorWalls]) {
-      if (!se.hasWall || se.lengthCm < 15) continue;
-      const offsetM = se.isInterior ? 0.22 : wallThickM + 0.38;
-      const ox = se.outwardNormal.x * offsetM;
-      const oz = se.outwardNormal.y * offsetM;
+    const allSegments = [...solved.solvedEdges, ...solved.solvedInteriorWalls];
+    allSegments.forEach((se, segIdx) => {
+      if (!se.hasWall || se.lengthCm < 15) return;
+      const layout = computeWallDimensionLayout(
+        wallThickM,
+        se.isInterior,
+        se.lengthCm,
+        segIdx
+      );
+      const ox = se.outwardNormal.x * layout.spanOffsetM;
+      const oz = se.outwardNormal.y * layout.spanOffsetM;
       const sx = se.start.x * CM_TO_M;
       const sz = se.start.y * CM_TO_M;
       const ex = se.end.x * CM_TO_M;
       const ez = se.end.y * CM_TO_M;
-      const yLine = 0.025;
+      const yLine = layout.yLineM;
 
       // Dimension span line
       dimVertices.push(sx + ox, yLine, sz + oz, ex + ox, yLine, ez + oz);
       // Witness ticks
-      const tickRatio = se.isInterior ? 0.08 : 0.14;
       dimVertices.push(
-        sx + se.outwardNormal.x * tickRatio,
+        sx + se.outwardNormal.x * layout.tickRatioM,
         yLine,
-        sz + se.outwardNormal.y * tickRatio,
+        sz + se.outwardNormal.y * layout.tickRatioM,
         sx + ox + se.outwardNormal.x * 0.08,
         yLine,
         sz + oz + se.outwardNormal.y * 0.08
       );
       dimVertices.push(
-        ex + se.outwardNormal.x * tickRatio,
+        ex + se.outwardNormal.x * layout.tickRatioM,
         yLine,
-        ez + se.outwardNormal.y * tickRatio,
+        ez + se.outwardNormal.y * layout.tickRatioM,
         ex + ox + se.outwardNormal.x * 0.08,
         yLine,
         ez + oz + se.outwardNormal.y * 0.08
@@ -968,39 +992,40 @@ export function buildRoomSceneGroup(
       const sprite = createDimensionBadgeSprite(
         `${shortCode} ${formatDimension(se.lengthCm, project.unit)}`,
         {
-          bg: selectedEdgeId === se.id ? 'rgba(239, 246, 255, 0.96)' : 'rgba(255, 255, 255, 0.92)',
+          bg: selectedEdgeId === se.id ? 'rgba(239, 246, 255, 0.96)' : 'rgba(255, 255, 255, 0.94)',
           border: selectedEdgeId === se.id ? '#2563eb' : '#94a3b8',
           color: selectedEdgeId === se.id ? '#1d4ed8' : '#0f172a',
-          heightMeters: 0.28,
+          heightMeters: layout.badgeHeightM,
+          depthTest: true,
         }
       );
       sprite.position.set(
         se.midpoint.x * CM_TO_M + ox,
-        0.22,
+        layout.badgeY,
         se.midpoint.y * CM_TO_M + oz
       );
       dimGroup.add(sprite);
-    }
+    });
 
-    if (dimVertices.length > 0) {
-      const lineGeo = new THREE.BufferGeometry();
-      lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(dimVertices, 3));
-      dimGroup.add(new THREE.LineSegments(lineGeo, dimLineMat));
-    }
-
-    // Ceiling height vertical ruler at first polygon corner
-    if (solved.polygonPoints.length > 0) {
-      const p0 = solved.polygonPoints[0];
-      const rx = p0.x * CM_TO_M - wallThickM - 0.35;
-      const rz = p0.y * CM_TO_M - wallThickM - 0.35;
+    // Ceiling height vertical ruler at first polygon corner (pushed along outward corner bisector)
+    const ceilingRuler = computeCeilingRulerPosition(
+      solved.polygonPoints,
+      solved.solvedEdges,
+      wallThickM,
+      ceilingM
+    );
+    if (ceilingRuler) {
+      const { x: rx, yBadge, z: rz, badgeHeightM } = ceilingRuler;
       const hVerts = new Float32Array([
-        rx, 0, rz, rx, ceilingM, rz,
-        rx - 0.1, 0, rz, rx + 0.1, 0, rz,
+        rx, 0.02, rz, rx, ceilingM, rz,
+        rx - 0.1, 0.02, rz, rx + 0.1, 0.02, rz,
         rx - 0.1, ceilingM, rz, rx + 0.1, ceilingM, rz,
       ]);
       const hGeo = new THREE.BufferGeometry();
       hGeo.setAttribute('position', new THREE.BufferAttribute(hVerts, 3));
-      dimGroup.add(new THREE.LineSegments(hGeo, heightLineMat));
+      const hLines = new THREE.LineSegments(hGeo, heightLineMat);
+      hLines.renderOrder = 9;
+      dimGroup.add(hLines);
 
       const ceilBadge = createDimensionBadgeSprite(
         `天花 ${formatDimension(project.ceilingHeightCm, project.unit)}`,
@@ -1008,10 +1033,11 @@ export function buildRoomSceneGroup(
           bg: 'rgba(240, 253, 250, 0.95)',
           border: '#0d9488',
           color: '#115e59',
-          heightMeters: 0.3,
+          heightMeters: badgeHeightM,
+          depthTest: true,
         }
       );
-      ceilBadge.position.set(rx, ceilingM * 0.55, rz);
+      ceilBadge.position.set(rx, yBadge, rz);
       dimGroup.add(ceilBadge);
     }
 
@@ -1027,23 +1053,26 @@ export function buildRoomSceneGroup(
             ? ` 台${formatDimension(el.elevationCm, project.unit, false)}`
             : '';
         const badgeText = `${el.name} ${wTxt}×${hTxt}${elevSuffix}`;
+        const pos = computeOpeningBadgePosition(pl.center, pl.edge, wallThickM, ceilingM);
         const badge = createDimensionBadgeSprite(badgeText, {
           bg: el.kind === 'window' ? 'rgba(240, 249, 255, 0.94)' : 'rgba(239, 246, 255, 0.94)',
           border: isSelected ? '#1d4ed8' : el.kind === 'window' ? '#0284c7' : '#3b82f6',
           color: el.kind === 'window' ? '#0369a1' : '#1e40af',
-          heightMeters: 0.26,
+          heightMeters: pos.badgeHeightM,
+          depthTest: true,
         });
-        const yPos = Math.min(
-          ceilingM + 0.28,
-          (el.elevationCm + el.heightCm) * CM_TO_M + 0.24
-        );
-        const normalShiftM = pl.edge && !pl.edge.isInterior ? wallThickM * 0.5 : 0;
-        badge.position.set(
-          pl.center.x * CM_TO_M + (pl.edge?.outwardNormal.x ?? 0) * normalShiftM,
-          yPos,
-          pl.center.y * CM_TO_M + (pl.edge?.outwardNormal.y ?? 0) * normalShiftM
-        );
+        badge.position.set(pos.x, pos.y, pos.z);
         dimGroup.add(badge);
+
+        // Short vertical leader tick above wall top anchoring the opening badge cleanly
+        dimVertices.push(
+          pos.x,
+          pos.leaderBottomY,
+          pos.z,
+          pos.x,
+          pos.leaderTopY,
+          pos.z
+        );
       } else if (isSelected) {
         const badgeText = `${el.name} ${Math.round(pl.clampedWidthCm)}×${Math.round(el.depthCm)}×${Math.round(el.heightCm)}`;
         const badge = createDimensionBadgeSprite(badgeText, {
@@ -1051,6 +1080,7 @@ export function buildRoomSceneGroup(
           border: '#1d4ed8',
           color: '#1e3a8a',
           heightMeters: 0.28,
+          depthTest: true,
         });
         badge.position.set(
           pl.boxCenter.x * CM_TO_M,
@@ -1059,6 +1089,14 @@ export function buildRoomSceneGroup(
         );
         dimGroup.add(badge);
       }
+    }
+
+    if (dimVertices.length > 0) {
+      const lineGeo = new THREE.BufferGeometry();
+      lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(dimVertices, 3));
+      const dimLines = new THREE.LineSegments(lineGeo, dimLineMat);
+      dimLines.renderOrder = 9;
+      dimGroup.add(dimLines);
     }
 
     roomGroup.add(dimGroup);
