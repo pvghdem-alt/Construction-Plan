@@ -42,6 +42,12 @@ import {
   ROOM_IN_ROOM_PRESET,
 } from './samplePresets';
 import { formatFirebaseAuthError } from './authErrorMessages';
+import {
+  buildShareDocId,
+  mergeShareEmailLists,
+  parseShareEmailsInput,
+  removeShareEmail,
+} from './cloudShareHelpers';
 
 test('snapAngleDeg snaps near-orthogonal and near-diagonal angles when enabled', () => {
   assert.deepEqual(snapAngleDeg(3, true, 8), { angleDeg: 0, snapped: true });
@@ -372,3 +378,28 @@ test('formatFirebaseAuthError maps Firebase auth error codes to clear Traditiona
   const fallbackMsg = formatFirebaseAuthError(new Error('Custom network hiccup'));
   assert.equal(fallbackMsg, 'Custom network hiccup');
 });
+
+test('cloudShareHelpers parses, deduplicates, merges, removes emails and builds valid Firestore IDs', () => {
+  const parsed = parseShareEmailsInput(
+    ' Jason2134@gmail.com, pvghdem@gmail.com ; invalid-email , jason2134@gmail.com ',
+    'pvghdem@gmail.com'
+  );
+  assert.deepEqual(parsed.validEmails, ['jason2134@gmail.com']);
+  assert.deepEqual(parsed.invalidTokens, ['invalid-email']);
+  assert.equal(parsed.ignoredSelf, true);
+
+  const merged = mergeShareEmailLists(['jason2134@gmail.com'], ['UserB@example.com', 'jason2134@gmail.com']);
+  assert.deepEqual(merged, ['jason2134@gmail.com', 'userb@example.com']);
+
+  const removed = removeShareEmail(merged, 'JASON2134@gmail.com');
+  assert.deepEqual(removed, ['userb@example.com']);
+
+  const docId = buildShareDocId('uid123_abc', 'plan_1700000_xyz');
+  assert.equal(docId, 'share_uid123_abc_plan_1700000_xyz');
+  assert.ok(/^[a-zA-Z0-9_-]{1,128}$/.test(docId));
+
+  const longId = buildShareDocId('u'.repeat(80), 'p'.repeat(80));
+  assert.ok(longId.length <= 128);
+  assert.ok(/^[a-zA-Z0-9_-]{1,128}$/.test(longId));
+});
+

@@ -2,6 +2,7 @@ import {
   collection,
   deleteDoc,
   doc,
+  getDoc,
   onSnapshot,
   query,
   serverTimestamp,
@@ -23,6 +24,12 @@ import type {
   WallEdge,
 } from '../types/floorplan';
 import { ALL_DOOR_SWINGS } from '../utils/floorplanGeometry';
+import {
+  buildShareDocId,
+  mergeShareEmailLists,
+  normalizeEmailAddress,
+  removeShareEmail,
+} from '../utils/cloudShareHelpers';
 
 export interface CloudFloorplanRecord {
   id: string;
@@ -36,6 +43,12 @@ export interface CloudFloorplanRecord {
   };
   updatedAtMs: number;
   createdAtMs: number;
+}
+
+export interface SharedCloudFloorplanRecord extends CloudFloorplanRecord {
+  ownerDisplayName: string;
+  sourcePlanId: string;
+  sharedWithEmails: string[];
 }
 
 function clampString(val: unknown, fallback: string, maxLen: number): string {
@@ -123,11 +136,12 @@ function sanitizeSectionLine(sec: SectionLine, idx: number): Record<string, unkn
   };
 }
 
-function buildFirestorePayload(
-  ownerId: string,
+function buildFloorplanBodyPayload(
   project: FloorplanProject,
-  solved: SolvedFloorplan,
-  includeCreatedAt: boolean
+  summaryInput: {
+    areaSqMeters: number;
+    areaPing: number;
+  }
 ): Record<string, unknown> {
   const safeEdges = project.edges.slice(0, 60).map(sanitizeEdge);
   const safeInteriorWalls = (project.interiorWalls ?? []).slice(0, 40).map(sanitizeInteriorWall);
@@ -147,8 +161,8 @@ function buildFirestorePayload(
     elements: safeElements,
     sectionLines: safeSectionLines,
     summary: {
-      areaSqMeters: Math.max(0, Math.round(solved.areaSqMeters * 100) / 100),
-      areaPing: Math.max(0, Math.round(solved.areaPing * 100) / 100),
+      areaSqMeters: Math.max(0, Math.round(summaryInput.areaSqMeters * 100) / 100),
+      areaPing: Math.max(0, Math.round(summaryInput.areaPing * 100) / 100),
       edgeCount: safeEdges.length,
       elementCount: safeElements.length,
     },
@@ -159,12 +173,66 @@ function buildFirestorePayload(
     payload.analysisNotes = project.analysisNotes.trim().slice(0, 1000);
   }
 
+  return payload;
+}
+
+function buildFirestorePayload(
+  ownerId: string,
+  project: FloorplanProject,
+  solved: SolvedFloorplan,
+  includeCreatedAt: boolean
+): Record<string, unknown> {
+  const payload = buildFloorplanBodyPayload(project, solved);
   if (includeCreatedAt) {
     payload.ownerId = ownerId;
     payload.createdAt = serverTimestamp();
   }
-
   return payload;
+}
+
+function parseFloorplanDocData(
+  d: Record<string, unknown>,
+  fallbackOwnerId: string
+): {
+  project: FloorplanProject;
+  summary: CloudFloorplanRecord['summary'];
+  updatedAtMs: number;
+  createdAtMs: number;
+  ownerId: string;
+} {
+  const updatedTs = d.updatedAt instanceof Timestamp ? d.updatedAt.toMillis() : Date.now();
+  const createdTs = d.createdAt instanceof Timestamp ? d.createdAt.toMillis() : updatedTs;
+  const proj: FloorplanProject = {
+    projectName: String(d.projectName || '未命名專案'),
+    ceilingHeightCm: Number(d.ceilingHeightCm) || 250,
+    wallThicknessCm: Number(d.wallThicknessCm) || 12,
+    unit: d.unit === 'm' || d.unit === 'mm' ? d.unit : 'cm',
+    autoSnapAngles: Boolean(d.autoSnapAngles),
+    snapToleranceDeg: Number(d.snapToleranceDeg ?? 8),
+    forceClose: Boolean(d.forceClose),
+    edges: Array.isArray(d.edges) ? (d.edges as WallEdge[]) : [],
+    ...(Array.isArray(d.interiorWalls) && d.interiorWalls.length > 0
+      ? { interiorWalls: d.interiorWalls as InteriorWall[] }
+      : {}),
+    elements: Array.isArray(d.elements) ? (d.elements as FloorplanElement[]) : [],
+    ...(Array.isArray(d.sectionLines) && d.sectionLines.length > 0
+      ? { sectionLines: d.sectionLines as SectionLine[] }
+      : {}),
+    ...(typeof d.analysisNotes === 'string' ? { analysisNotes: d.analysisNotes } : {}),
+  };
+  const sum = (d.summary || {}) as Record<string, unknown>;
+  return {
+    ownerId: String(d.ownerId || fallbackOwnerId),
+    project: proj,
+    summary: {
+      areaSqMeters: Number(sum.areaSqMeters) || 0,
+      areaPing: Number(sum.areaPing) || 0,
+      edgeCount: Number(sum.edgeCount) || proj.edges.length,
+      elementCount: Number(sum.elementCount) || proj.elements.length,
+    },
+    updatedAtMs: updatedTs,
+    createdAtMs: createdTs,
+  };
 }
 
 export async function ensureUserProfile(user: User): Promise<void> {
@@ -195,40 +263,88 @@ export function subscribeUserFloorplans(
     q,
     (snapshot) => {
       const records: CloudFloorplanRecord[] = snapshot.docs.map((docSnap) => {
-        const d = docSnap.data();
-        const updatedTs = d.updatedAt instanceof Timestamp ? d.updatedAt.toMillis() : Date.now();
-        const createdTs = d.createdAt instanceof Timestamp ? d.createdAt.toMillis() : updatedTs;
-        const proj: FloorplanProject = {
-          projectName: String(d.projectName || '未命名專案'),
-          ceilingHeightCm: Number(d.ceilingHeightCm) || 250,
-          wallThicknessCm: Number(d.wallThicknessCm) || 12,
-          unit: d.unit === 'm' || d.unit === 'mm' ? d.unit : 'cm',
-          autoSnapAngles: Boolean(d.autoSnapAngles),
-          snapToleranceDeg: Number(d.snapToleranceDeg ?? 8),
-          forceClose: Boolean(d.forceClose),
-          edges: Array.isArray(d.edges) ? (d.edges as WallEdge[]) : [],
-          ...(Array.isArray(d.interiorWalls) && d.interiorWalls.length > 0
-            ? { interiorWalls: d.interiorWalls as InteriorWall[] }
-            : {}),
-          elements: Array.isArray(d.elements) ? (d.elements as FloorplanElement[]) : [],
-          ...(Array.isArray(d.sectionLines) && d.sectionLines.length > 0
-            ? { sectionLines: d.sectionLines as SectionLine[] }
-            : {}),
-          ...(typeof d.analysisNotes === 'string' ? { analysisNotes: d.analysisNotes } : {}),
-        };
-        const sum = (d.summary || {}) as Record<string, unknown>;
+        const parsed = parseFloorplanDocData(docSnap.data() as Record<string, unknown>, userId);
         return {
           id: docSnap.id,
-          ownerId: String(d.ownerId || userId),
-          project: proj,
-          summary: {
-            areaSqMeters: Number(sum.areaSqMeters) || 0,
-            areaPing: Number(sum.areaPing) || 0,
-            edgeCount: Number(sum.edgeCount) || proj.edges.length,
-            elementCount: Number(sum.elementCount) || proj.elements.length,
-          },
-          updatedAtMs: updatedTs,
-          createdAtMs: createdTs,
+          ...parsed,
+        };
+      });
+      records.sort((a, b) => b.updatedAtMs - a.updatedAtMs);
+      onData(records);
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, colPath);
+      } catch (wrapped) {
+        onError(wrapped instanceof Error ? wrapped : new Error(String(wrapped)));
+      }
+    }
+  );
+}
+
+export function subscribeMySharedFloorplans(
+  userId: string,
+  onData: (records: SharedCloudFloorplanRecord[]) => void,
+  onError: (err: Error) => void
+): Unsubscribe {
+  const colPath = 'shared_floorplans';
+  const q = query(collection(db, 'shared_floorplans'), where('ownerId', '==', userId));
+
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const records: SharedCloudFloorplanRecord[] = snapshot.docs.map((docSnap) => {
+        const d = docSnap.data() as Record<string, unknown>;
+        const parsed = parseFloorplanDocData(d, userId);
+        return {
+          id: docSnap.id,
+          ...parsed,
+          ownerDisplayName: typeof d.ownerDisplayName === 'string' ? d.ownerDisplayName : '',
+          sourcePlanId: typeof d.sourcePlanId === 'string' ? d.sourcePlanId : docSnap.id,
+          sharedWithEmails: Array.isArray(d.sharedWithEmails)
+            ? d.sharedWithEmails.filter((e): e is string => typeof e === 'string')
+            : [],
+        };
+      });
+      records.sort((a, b) => b.updatedAtMs - a.updatedAtMs);
+      onData(records);
+    },
+    (error) => {
+      try {
+        handleFirestoreError(error, OperationType.LIST, colPath);
+      } catch (wrapped) {
+        onError(wrapped instanceof Error ? wrapped : new Error(String(wrapped)));
+      }
+    }
+  );
+}
+
+export function subscribeSharedWithMeFloorplans(
+  userEmail: string,
+  onData: (records: SharedCloudFloorplanRecord[]) => void,
+  onError: (err: Error) => void
+): Unsubscribe {
+  const normalizedEmail = normalizeEmailAddress(userEmail);
+  const colPath = 'shared_floorplans';
+  const q = query(
+    collection(db, 'shared_floorplans'),
+    where('sharedWithEmails', 'array-contains', normalizedEmail)
+  );
+
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const records: SharedCloudFloorplanRecord[] = snapshot.docs.map((docSnap) => {
+        const d = docSnap.data() as Record<string, unknown>;
+        const parsed = parseFloorplanDocData(d, '');
+        return {
+          id: docSnap.id,
+          ...parsed,
+          ownerDisplayName: typeof d.ownerDisplayName === 'string' ? d.ownerDisplayName : '共用團隊成員',
+          sourcePlanId: typeof d.sourcePlanId === 'string' ? d.sourcePlanId : docSnap.id,
+          sharedWithEmails: Array.isArray(d.sharedWithEmails)
+            ? d.sharedWithEmails.filter((e): e is string => typeof e === 'string')
+            : [],
         };
       });
       records.sort((a, b) => b.updatedAtMs - a.updatedAtMs);
@@ -264,7 +380,8 @@ export async function updateCloudFloorplan(
   userId: string,
   planId: string,
   project: FloorplanProject,
-  solved: SolvedFloorplan
+  solved: SolvedFloorplan,
+  ownerDisplayName?: string | null
 ): Promise<void> {
   const docPath = `users/${userId}/floorplans/${planId}`;
   try {
@@ -272,6 +389,23 @@ export async function updateCloudFloorplan(
     await updateDoc(doc(db, 'users', userId, 'floorplans', planId), payload);
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, docPath);
+  }
+
+  // Keep any active shared snapshot in sync when the owner updates the source plan
+  const shareId = buildShareDocId(userId, planId);
+  const sharePath = `shared_floorplans/${shareId}`;
+  try {
+    const shareRef = doc(db, 'shared_floorplans', shareId);
+    const shareSnap = await getDoc(shareRef);
+    if (shareSnap.exists()) {
+      const updateBody = buildFloorplanBodyPayload(project, solved);
+      if (ownerDisplayName && ownerDisplayName.trim()) {
+        updateBody.ownerDisplayName = ownerDisplayName.trim().slice(0, 120);
+      }
+      await updateDoc(shareRef, updateBody);
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, sharePath);
   }
 }
 
@@ -281,5 +415,85 @@ export async function deleteCloudFloorplan(userId: string, planId: string): Prom
     await deleteDoc(doc(db, 'users', userId, 'floorplans', planId));
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, docPath);
+  }
+
+  // Clean up any shared snapshot for this deleted project
+  const shareId = buildShareDocId(userId, planId);
+  const sharePath = `shared_floorplans/${shareId}`;
+  try {
+    const shareRef = doc(db, 'shared_floorplans', shareId);
+    const shareSnap = await getDoc(shareRef);
+    if (shareSnap.exists()) {
+      await deleteDoc(shareRef);
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, sharePath);
+  }
+}
+
+export async function shareCloudFloorplanWithEmails(
+  user: User,
+  record: CloudFloorplanRecord,
+  recipientEmails: string[]
+): Promise<void> {
+  const shareId = buildShareDocId(user.uid, record.id);
+  const sharePath = `shared_floorplans/${shareId}`;
+  const shareRef = doc(db, 'shared_floorplans', shareId);
+  const ownerDisplay = (user.displayName || user.email || '雲端空間擁有者').trim().slice(0, 120);
+
+  try {
+    const existingSnap = await getDoc(shareRef);
+    if (existingSnap.exists()) {
+      const existingData = existingSnap.data() as Record<string, unknown>;
+      const existingList = Array.isArray(existingData.sharedWithEmails)
+        ? existingData.sharedWithEmails.filter((e): e is string => typeof e === 'string')
+        : [];
+      const mergedEmails = mergeShareEmailLists(existingList, recipientEmails);
+      if (mergedEmails.length === 0) return;
+
+      const updatePayload: Record<string, unknown> = {
+        ...buildFloorplanBodyPayload(record.project, record.summary),
+        sharedWithEmails: mergedEmails,
+        ownerDisplayName: ownerDisplay,
+      };
+      await updateDoc(shareRef, updatePayload);
+    } else {
+      const initialEmails = mergeShareEmailLists([], recipientEmails);
+      if (initialEmails.length === 0) return;
+
+      const createPayload: Record<string, unknown> = {
+        ...buildFloorplanBodyPayload(record.project, record.summary),
+        ownerId: user.uid,
+        ownerDisplayName: ownerDisplay,
+        sourcePlanId: record.id,
+        sharedWithEmails: initialEmails,
+        createdAt: serverTimestamp(),
+      };
+      await setDoc(shareRef, createPayload);
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, sharePath);
+  }
+}
+
+export async function revokeCloudFloorplanShareEmail(
+  shareRecord: SharedCloudFloorplanRecord,
+  emailToRemove: string
+): Promise<void> {
+  const sharePath = `shared_floorplans/${shareRecord.id}`;
+  const shareRef = doc(db, 'shared_floorplans', shareRecord.id);
+  const nextEmails = removeShareEmail(shareRecord.sharedWithEmails, emailToRemove);
+
+  try {
+    if (nextEmails.length === 0) {
+      await deleteDoc(shareRef);
+    } else {
+      await updateDoc(shareRef, {
+        sharedWithEmails: nextEmails,
+        updatedAt: serverTimestamp(),
+      });
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, sharePath);
   }
 }

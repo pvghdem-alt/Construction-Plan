@@ -119,6 +119,119 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "SharedFloorplanDocument": {
+      "title": "SharedFloorplanDocument",
+      "description": "Email-shared snapshot of a user-owned floorplan project readable by authorized recipients.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerDisplayName": {
+          "type": "string",
+          "description": "Optional owner display name",
+          "maxLength": 120
+        },
+        "sourcePlanId": {
+          "type": "string",
+          "description": "Source floorplan document ID under /users/{ownerId}/floorplans",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "sharedWithEmails": {
+          "type": "array",
+          "description": "Authorized recipient email addresses in lowercase (1 to 20)"
+        },
+        "projectName": {
+          "type": "string",
+          "description": "Floorplan project title",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "ceilingHeightCm": {
+          "type": "number",
+          "description": "Ceiling height in cm"
+        },
+        "wallThicknessCm": {
+          "type": "number",
+          "description": "Wall thickness in cm"
+        },
+        "unit": {
+          "type": "string",
+          "enum": ["cm", "m", "mm"],
+          "description": "Display unit"
+        },
+        "autoSnapAngles": {
+          "type": "boolean",
+          "description": "Auto-snap near orthogonal/diagonal wall angles"
+        },
+        "snapToleranceDeg": {
+          "type": "number",
+          "description": "Snap angle tolerance in degrees"
+        },
+        "forceClose": {
+          "type": "boolean",
+          "description": "Force close polygon via Bowditch distribution"
+        },
+        "analysisNotes": {
+          "type": "string",
+          "description": "Optional recognition or project notes",
+          "maxLength": 1000
+        },
+        "edges": {
+          "type": "array",
+          "description": "Ordered wall edges (max 60)"
+        },
+        "interiorWalls": {
+          "type": "array",
+          "description": "Optional interior partition walls (max 40)"
+        },
+        "elements": {
+          "type": "array",
+          "description": "Doors, windows, cabinets, and furniture elements (max 120)"
+        },
+        "sectionLines": {
+          "type": "array",
+          "description": "Optional architectural section lines for elevation views (max 20)"
+        },
+        "summary": {
+          "type": "object",
+          "description": "Precomputed display metrics (areaSqMeters, areaPing, edgeCount, elementCount)"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Share creation server timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last sync server timestamp"
+        }
+      },
+      "required": [
+        "ownerId",
+        "sourcePlanId",
+        "sharedWithEmails",
+        "projectName",
+        "ceilingHeightCm",
+        "wallThicknessCm",
+        "unit",
+        "autoSnapAngles",
+        "snapToleranceDeg",
+        "forceClose",
+        "edges",
+        "elements",
+        "summary",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -133,6 +246,12 @@
         "$ref": "#/entities/FloorplanDocument"
       },
       "description": "User-owned cloud-persisted floorplan projects."
+    },
+    "/shared_floorplans/{shareId}": {
+      "schema": {
+        "$ref": "#/entities/SharedFloorplanDocument"
+      },
+      "description": "Email-shared floorplan snapshots accessible to the owner and listed verified recipient emails."
     }
   }
 }

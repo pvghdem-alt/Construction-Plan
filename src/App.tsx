@@ -30,10 +30,15 @@ import { formatFirebaseAuthError } from './utils/authErrorMessages';
 import {
   deleteCloudFloorplan,
   ensureUserProfile,
+  revokeCloudFloorplanShareEmail,
   saveNewCloudFloorplan,
+  shareCloudFloorplanWithEmails,
+  subscribeMySharedFloorplans,
+  subscribeSharedWithMeFloorplans,
   subscribeUserFloorplans,
   updateCloudFloorplan,
   type CloudFloorplanRecord,
+  type SharedCloudFloorplanRecord,
 } from './services/cloudFloorplans';
 import { CloudStorageModal } from './components/CloudStorageModal';
 import { ElementDimensionsModal } from './components/ElementDimensionsModal';
@@ -175,6 +180,8 @@ export default function App() {
   const [authRefreshTick, setAuthRefreshTick] = useState(0);
   const [cloudModalOpen, setCloudModalOpen] = useState(false);
   const [cloudRecords, setCloudRecords] = useState<CloudFloorplanRecord[]>([]);
+  const [mySharedRecords, setMySharedRecords] = useState<SharedCloudFloorplanRecord[]>([]);
+  const [sharedWithMeRecords, setSharedWithMeRecords] = useState<SharedCloudFloorplanRecord[]>([]);
   const [isLoadingCloud, setIsLoadingCloud] = useState(false);
   const [cloudError, setCloudError] = useState<string | null>(null);
   const [activeCloudId, setActiveCloudId] = useState<string | null>(null);
@@ -269,6 +276,8 @@ export default function App() {
       setAuthReady(true);
       if (!nextUser) {
         setCloudRecords([]);
+        setMySharedRecords([]);
+        setSharedWithMeRecords([]);
         setActiveCloudId(null);
         setCloudError(null);
         setIsLoadingCloud(false);
@@ -278,6 +287,8 @@ export default function App() {
         });
       } else {
         setCloudRecords([]);
+        setMySharedRecords([]);
+        setSharedWithMeRecords([]);
         setActiveCloudId(null);
         setCloudError(null);
         setIsLoadingCloud(false);
@@ -293,7 +304,7 @@ export default function App() {
     void ensureUserProfile(user).catch((err) => {
       setCloudError(err instanceof Error ? err.message : '無法建立使用者資料');
     });
-    const unsub = subscribeUserFloorplans(
+    const unsubOwn = subscribeUserFloorplans(
       user.uid,
       (records) => {
         setCloudRecords(records);
@@ -304,7 +315,31 @@ export default function App() {
         setIsLoadingCloud(false);
       }
     );
-    return () => unsub();
+    const unsubMyShares = subscribeMySharedFloorplans(
+      user.uid,
+      (records) => {
+        setMySharedRecords(records);
+      },
+      (err) => {
+        setCloudError(err.message);
+      }
+    );
+    const unsubSharedWithMe = user.email
+      ? subscribeSharedWithMeFloorplans(
+          user.email,
+          (records) => {
+            setSharedWithMeRecords(records.filter((r) => r.ownerId !== user.uid));
+          },
+          (err) => {
+            setCloudError(err.message);
+          }
+        )
+      : () => {};
+    return () => {
+      unsubOwn();
+      unsubMyShares();
+      unsubSharedWithMe();
+    };
   }, [authReady, user, authRefreshTick]);
 
   const handleSignIn = useCallback(async () => {
@@ -405,7 +440,13 @@ export default function App() {
         ? { ...project, projectName: titleOverride }
         : project;
       const nextSolved = solveFloorplan(nextProject);
-      await updateCloudFloorplan(user.uid, activeCloudId, nextProject, nextSolved);
+      await updateCloudFloorplan(
+        user.uid,
+        activeCloudId,
+        nextProject,
+        nextSolved,
+        user.displayName || user.email
+      );
       setProject(nextProject);
     },
     [user, activeCloudId, project]
@@ -421,6 +462,36 @@ export default function App() {
     setActiveCloudId(record.id);
     setMobilePanel('canvas');
   }, [setProject]);
+
+  const handleLoadSharedRecord = useCallback((record: SharedCloudFloorplanRecord) => {
+    setAnalyzeError(null);
+    setSelectedEdgeId(null);
+    setSelectedElementId(null);
+    setSelectedSectionId(record.project.sectionLines?.[0]?.id ?? null);
+    setSectionDrawMode(false);
+    setProject(record.project);
+    setActiveCloudId(null);
+    setMobilePanel('canvas');
+    showToast(`已載入共用專案「${record.project.projectName}」（如需保留修改請另存至個人雲端）`);
+  }, [setProject, showToast]);
+
+  const handleShareCloudRecords = useCallback(
+    async (recordsToShare: CloudFloorplanRecord[], recipientEmails: string[]) => {
+      if (!user) throw new Error('請先登入帳號。');
+      await Promise.all(
+        recordsToShare.map((rec) => shareCloudFloorplanWithEmails(user, rec, recipientEmails))
+      );
+    },
+    [user]
+  );
+
+  const handleRevokeShareEmail = useCallback(
+    async (shareRecord: SharedCloudFloorplanRecord, email: string) => {
+      if (!user) return;
+      await revokeCloudFloorplanShareEmail(shareRecord, email);
+    },
+    [user]
+  );
 
   const handleDeleteCloudRecord = useCallback(
     async (record: CloudFloorplanRecord) => {
@@ -880,7 +951,11 @@ export default function App() {
                   className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 transition-colors whitespace-nowrap shrink-0"
                 >
                   <Cloud className="w-3.5 h-3.5" />
-                  <span>{user ? `雲端專案 (${cloudRecords.length})` : '雲端儲存 / 讀取'}</span>
+                  <span>
+                    {user
+                      ? `雲端專案 (${cloudRecords.length + sharedWithMeRecords.length})`
+                      : '雲端儲存 / 讀取'}
+                  </span>
                 </button>
               </>
             )}
@@ -1273,11 +1348,16 @@ export default function App() {
             currentSolved={solved}
             activeCloudId={activeCloudId}
             records={cloudRecords}
+            mySharedRecords={mySharedRecords}
+            sharedWithMeRecords={sharedWithMeRecords}
             isLoadingRecords={isLoadingCloud}
             cloudError={cloudError}
             onSaveNew={handleSaveNewCloud}
             onUpdateExisting={handleUpdateCloud}
             onLoadRecord={handleLoadCloudRecord}
+            onLoadSharedRecord={handleLoadSharedRecord}
+            onShareRecords={handleShareCloudRecords}
+            onRevokeShareEmail={handleRevokeShareEmail}
             onDeleteRecord={handleDeleteCloudRecord}
           />
 

@@ -46,6 +46,24 @@ service cloud.firestore {
         summary.elementCount is int && summary.elementCount >= 0 && summary.elementCount <= 120;
     }
 
+    function hasValidFloorplanBody(data) {
+      return data.projectName is string && data.projectName.size() >= 1 && data.projectName.size() <= 100 &&
+        data.ceilingHeightCm is number && data.ceilingHeightCm >= 100 && data.ceilingHeightCm <= 1000 &&
+        data.wallThicknessCm is number && data.wallThicknessCm >= 4 && data.wallThicknessCm <= 100 &&
+        data.unit is string && data.unit in ['cm', 'm', 'mm'] &&
+        data.autoSnapAngles is bool &&
+        data.snapToleranceDeg is number && data.snapToleranceDeg >= 0 && data.snapToleranceDeg <= 45 &&
+        data.forceClose is bool &&
+        (!data.keys().hasAny(['analysisNotes']) || (data.analysisNotes is string && data.analysisNotes.size() <= 1000)) &&
+        data.edges is list && data.edges.size() >= 1 && data.edges.size() <= 60 && data.edges[0] is map &&
+        (!data.keys().hasAny(['interiorWalls']) || (data.interiorWalls is list && data.interiorWalls.size() <= 40 && (data.interiorWalls.size() == 0 || data.interiorWalls[0] is map))) &&
+        data.elements is list && data.elements.size() <= 120 && (data.elements.size() == 0 || data.elements[0] is map) &&
+        (!data.keys().hasAny(['sectionLines']) || (data.sectionLines is list && data.sectionLines.size() <= 20 && (data.sectionLines.size() == 0 || data.sectionLines[0] is map))) &&
+        isValidSummary(data.summary) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp && data.updatedAt == request.time;
+    }
+
     function isValidFloorplan(data, userId) {
       return data.keys().hasAll([
           'ownerId',
@@ -81,21 +99,64 @@ service cloud.firestore {
           'updatedAt'
         ]) &&
         data.ownerId is string && data.ownerId == userId && data.ownerId == request.auth.uid && data.ownerId.size() <= 128 &&
-        data.projectName is string && data.projectName.size() >= 1 && data.projectName.size() <= 100 &&
-        data.ceilingHeightCm is number && data.ceilingHeightCm >= 100 && data.ceilingHeightCm <= 1000 &&
-        data.wallThicknessCm is number && data.wallThicknessCm >= 4 && data.wallThicknessCm <= 100 &&
-        data.unit is string && data.unit in ['cm', 'm', 'mm'] &&
-        data.autoSnapAngles is bool &&
-        data.snapToleranceDeg is number && data.snapToleranceDeg >= 0 && data.snapToleranceDeg <= 45 &&
-        data.forceClose is bool &&
-        (!data.keys().hasAny(['analysisNotes']) || (data.analysisNotes is string && data.analysisNotes.size() <= 1000)) &&
-        data.edges is list && data.edges.size() >= 1 && data.edges.size() <= 60 && data.edges[0] is map &&
-        (!data.keys().hasAny(['interiorWalls']) || (data.interiorWalls is list && data.interiorWalls.size() <= 40 && (data.interiorWalls.size() == 0 || data.interiorWalls[0] is map))) &&
-        data.elements is list && data.elements.size() <= 120 && (data.elements.size() == 0 || data.elements[0] is map) &&
-        (!data.keys().hasAny(['sectionLines']) || (data.sectionLines is list && data.sectionLines.size() <= 20 && (data.sectionLines.size() == 0 || data.sectionLines[0] is map))) &&
-        isValidSummary(data.summary) &&
-        data.createdAt is timestamp &&
-        data.updatedAt is timestamp && data.updatedAt == request.time;
+        hasValidFloorplanBody(data);
+    }
+
+    function isValidSharedFloorplan(data) {
+      return data.keys().hasAll([
+          'ownerId',
+          'sourcePlanId',
+          'sharedWithEmails',
+          'projectName',
+          'ceilingHeightCm',
+          'wallThicknessCm',
+          'unit',
+          'autoSnapAngles',
+          'snapToleranceDeg',
+          'forceClose',
+          'edges',
+          'elements',
+          'summary',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId',
+          'ownerDisplayName',
+          'sourcePlanId',
+          'sharedWithEmails',
+          'projectName',
+          'ceilingHeightCm',
+          'wallThicknessCm',
+          'unit',
+          'autoSnapAngles',
+          'snapToleranceDeg',
+          'forceClose',
+          'analysisNotes',
+          'edges',
+          'interiorWalls',
+          'elements',
+          'sectionLines',
+          'summary',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        isValidId(data.ownerId) &&
+        data.ownerId == request.auth.uid &&
+        isValidId(data.sourcePlanId) &&
+        (!data.keys().hasAny(['ownerDisplayName']) || (data.ownerDisplayName is string && data.ownerDisplayName.size() <= 120)) &&
+        data.sharedWithEmails is list &&
+        data.sharedWithEmails.size() >= 1 &&
+        data.sharedWithEmails.size() <= 20 &&
+        data.sharedWithEmails[0] is string &&
+        data.sharedWithEmails[0].size() >= 3 &&
+        data.sharedWithEmails[0].size() <= 120 &&
+        hasValidFloorplanBody(data);
+    }
+
+    function isSharedRecipient(docData) {
+      return request.auth.token.email is string &&
+        request.auth.token.email.lower() in docData.sharedWithEmails;
     }
 
     match /users/{userId} {
@@ -135,6 +196,43 @@ service cloud.firestore {
           ]);
         allow delete: if isValidId(userId) && isValidId(planId) && isOwner(userId) && existing().ownerId == request.auth.uid;
       }
+    }
+
+    match /shared_floorplans/{shareId} {
+      allow get: if isSignedIn() && isValidId(shareId) &&
+        (existing().ownerId == request.auth.uid || isSharedRecipient(existing()));
+      allow list: if isSignedIn() &&
+        (resource.data.ownerId == request.auth.uid || isSharedRecipient(resource.data));
+      allow create: if isSignedIn() && isValidId(shareId) &&
+        isValidSharedFloorplan(incoming()) &&
+        incoming().createdAt == request.time &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)/floorplans/$(incoming().sourcePlanId)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)/floorplans/$(incoming().sourcePlanId)).data.ownerId == request.auth.uid;
+      allow update: if isSignedIn() && isValidId(shareId) &&
+        isValidSharedFloorplan(incoming()) &&
+        existing().ownerId == request.auth.uid &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().sourcePlanId == existing().sourcePlanId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'ownerDisplayName',
+          'sharedWithEmails',
+          'projectName',
+          'ceilingHeightCm',
+          'wallThicknessCm',
+          'unit',
+          'autoSnapAngles',
+          'snapToleranceDeg',
+          'forceClose',
+          'analysisNotes',
+          'edges',
+          'interiorWalls',
+          'elements',
+          'sectionLines',
+          'summary',
+          'updatedAt'
+        ]);
+      allow delete: if isSignedIn() && isValidId(shareId) && existing().ownerId == request.auth.uid;
     }
   }
 }

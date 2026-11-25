@@ -15,10 +15,16 @@ import {
   Mail,
   KeyRound,
   ShieldAlert,
+  UserPlus,
+  Users,
 } from 'lucide-react';
 import type { User } from 'firebase/auth';
 import type { FloorplanProject, SolvedFloorplan } from '../types/floorplan';
-import type { CloudFloorplanRecord } from '../services/cloudFloorplans';
+import type {
+  CloudFloorplanRecord,
+  SharedCloudFloorplanRecord,
+} from '../services/cloudFloorplans';
+import { parseShareEmailsInput } from '../utils/cloudShareHelpers';
 
 interface CloudStorageModalProps {
   isOpen: boolean;
@@ -36,11 +42,16 @@ interface CloudStorageModalProps {
   currentSolved: SolvedFloorplan;
   activeCloudId: string | null;
   records: CloudFloorplanRecord[];
+  mySharedRecords: SharedCloudFloorplanRecord[];
+  sharedWithMeRecords: SharedCloudFloorplanRecord[];
   isLoadingRecords: boolean;
   cloudError: string | null;
   onSaveNew: (titleOverride?: string) => Promise<void>;
   onUpdateExisting: (titleOverride?: string) => Promise<void>;
   onLoadRecord: (record: CloudFloorplanRecord) => void;
+  onLoadSharedRecord: (record: SharedCloudFloorplanRecord) => void;
+  onShareRecords: (records: CloudFloorplanRecord[], emails: string[]) => Promise<void>;
+  onRevokeShareEmail: (shareRecord: SharedCloudFloorplanRecord, email: string) => Promise<void>;
   onDeleteRecord: (record: CloudFloorplanRecord) => Promise<void>;
 }
 
@@ -75,11 +86,16 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
   currentSolved,
   activeCloudId,
   records,
+  mySharedRecords,
+  sharedWithMeRecords,
   isLoadingRecords,
   cloudError,
   onSaveNew,
   onUpdateExisting,
   onLoadRecord,
+  onLoadSharedRecord,
+  onShareRecords,
+  onRevokeShareEmail,
   onDeleteRecord,
 }) => {
   const [titleDraft, setTitleDraft] = useState(currentProject.projectName);
@@ -88,6 +104,10 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  const [shareEmailsDraft, setShareEmailsDraft] = useState('');
+  const [isSharingBusy, setIsSharingBusy] = useState(false);
+  const shareInputRef = React.useRef<HTMLInputElement | null>(null);
 
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [emailDraft, setEmailDraft] = useState('');
@@ -102,6 +122,65 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
       setActionError(null);
     }
   }, [isOpen, currentProject.projectName]);
+
+  const myShareByPlanId = useMemo(() => {
+    const map = new Map<string, SharedCloudFloorplanRecord>();
+    for (const share of mySharedRecords) {
+      map.set(share.sourcePlanId, share);
+    }
+    return map;
+  }, [mySharedRecords]);
+
+  const handleShareTargetRecords = async (
+    targetRecords: CloudFloorplanRecord[],
+    successLabel: string
+  ) => {
+    const parsed = parseShareEmailsInput(shareEmailsDraft, user?.email);
+    if (parsed.invalidTokens.length > 0) {
+      setActionError(`以下 Email 格式不正確：${parsed.invalidTokens.join(', ')}`);
+      return;
+    }
+    if (parsed.validEmails.length === 0) {
+      setActionError(
+        parsed.ignoredSelf
+          ? '無法分享給目前登入的同一組 Email，請輸入對方的 Email（例如 jason2134@gmail.com）。'
+          : '請先輸入對方的 Email（例如 jason2134@gmail.com）。'
+      );
+      shareInputRef.current?.focus();
+      return;
+    }
+    setIsSharingBusy(true);
+    setActionError(null);
+    setStatusMessage(null);
+    try {
+      await onShareRecords(targetRecords, parsed.validEmails);
+      setStatusMessage(
+        `${successLabel}給 ${parsed.validEmails.join('、')}！對方使用該 Email 登入即可讀取。`
+      );
+      setShareEmailsDraft('');
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : '雲端分享失敗，請稍後再試。');
+    } finally {
+      setIsSharingBusy(false);
+    }
+  };
+
+  const handleRevokeEmailClick = async (
+    shareRecord: SharedCloudFloorplanRecord,
+    email: string
+  ) => {
+    setIsSharingBusy(true);
+    setActionError(null);
+    setStatusMessage(null);
+    try {
+      await onRevokeShareEmail(shareRecord, email);
+      setStatusMessage(`已取消「${shareRecord.project.projectName}」對 ${email} 的共用權限。`);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : '取消共用失敗，請稍後再試。');
+    } finally {
+      setIsSharingBusy(false);
+    }
+  };
 
   const handleEmailAuthSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -571,6 +650,46 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
                   </div>
                 </div>
 
+                {/* Cross-Account Sharing Bar */}
+                {records.length > 0 && (
+                  <div className="p-3 rounded-xl border border-blue-200 bg-blue-50/50 space-y-2">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-blue-950">
+                      <Users className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                      <span>開放其他帳號讀取雲端專案</span>
+                    </div>
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <input
+                        ref={shareInputRef}
+                        id="cloud-share-email-input"
+                        type="text"
+                        value={shareEmailsDraft}
+                        onChange={(e) => setShareEmailsDraft(e.target.value)}
+                        placeholder="輸入對方 Email（如 jason2134@gmail.com，多位以逗號分隔）"
+                        aria-label="要共用的對象 Email"
+                        className="flex-1 min-w-0 px-3 py-1.5 text-xs bg-white border border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                      <button
+                        type="button"
+                        disabled={isSharingBusy}
+                        onClick={() =>
+                          handleShareTargetRecords(
+                            records,
+                            `已將全部 ${records.length} 個雲端專案共用`
+                          )
+                        }
+                        className="flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
+                      >
+                        {isSharingBusy ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <UserPlus className="w-3.5 h-3.5" />
+                        )}
+                        <span>一鍵共用全部 ({records.length})</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {isLoadingRecords ? (
                   <div className="py-10 flex items-center justify-center gap-2 text-xs text-slate-500 border border-slate-200 rounded-xl">
                     <Loader2 className="w-4 h-4 animate-spin text-blue-600" />
@@ -593,69 +712,176 @@ export const CloudStorageModal: React.FC<CloudStorageModalProps> = ({
                   <div className="space-y-2">
                     {filteredRecords.map((rec) => {
                       const isActive = rec.id === activeCloudId;
+                      const shareRec = myShareByPlanId.get(rec.id);
                       return (
                         <div
                           key={rec.id}
-                          className={`p-3.5 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors ${
+                          className={`p-3.5 rounded-xl border space-y-2.5 transition-colors ${
                             isActive
                               ? 'border-blue-500 bg-blue-50/40'
                               : 'border-slate-200 bg-white hover:border-slate-300'
                           }`}
                         >
-                          <div className="min-w-0 space-y-1">
-                            <div className="flex items-center gap-2">
-                              <p className="text-sm font-semibold text-slate-900 truncate">
-                                {rec.project.projectName}
-                              </p>
-                              {isActive && (
-                                <span className="text-[11px] font-semibold text-blue-700 shrink-0">
-                                  目前編輯中
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                            <div className="min-w-0 space-y-1">
+                              <div className="flex items-center gap-2">
+                                <p className="text-sm font-semibold text-slate-900 truncate">
+                                  {rec.project.projectName}
+                                </p>
+                                {isActive && (
+                                  <span className="text-[11px] font-semibold text-blue-700 shrink-0">
+                                    目前編輯中
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-xs text-slate-500 tabular-nums">
+                                <span>
+                                  {rec.summary.areaSqMeters.toFixed(2)} m² ({rec.summary.areaPing.toFixed(2)} 坪)
                                 </span>
-                              )}
+                                <span aria-hidden="true">·</span>
+                                <span>{rec.summary.edgeCount} 段牆壁</span>
+                                <span aria-hidden="true">·</span>
+                                <span>{rec.summary.elementCount} 個元件</span>
+                                <span aria-hidden="true">·</span>
+                                <span>更新於 {formatUpdatedAt(rec.updatedAtMs)}</span>
+                              </div>
                             </div>
-                            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-xs text-slate-500 tabular-nums">
-                              <span>
-                                {rec.summary.areaSqMeters.toFixed(2)} m² ({rec.summary.areaPing.toFixed(2)} 坪)
-                              </span>
-                              <span aria-hidden="true">·</span>
-                              <span>{rec.summary.edgeCount} 段牆壁</span>
-                              <span aria-hidden="true">·</span>
-                              <span>{rec.summary.elementCount} 個元件</span>
-                              <span aria-hidden="true">·</span>
-                              <span>更新於 {formatUpdatedAt(rec.updatedAtMs)}</span>
+
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                type="button"
+                                disabled={isSharingBusy}
+                                onClick={() =>
+                                  handleShareTargetRecords(
+                                    [rec],
+                                    `已將「${rec.project.projectName}」共用`
+                                  )
+                                }
+                                title="使用上方輸入的 Email 共用此專案"
+                                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 disabled:opacity-50 transition-colors whitespace-nowrap shrink-0"
+                              >
+                                <UserPlus className="w-3.5 h-3.5" />
+                                <span>共用</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  onLoadRecord(rec);
+                                  onClose();
+                                }}
+                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-900 text-white hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+                              >
+                                <FolderOpen className="w-3.5 h-3.5" />
+                                <span>載入編輯</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                disabled={deletingId === rec.id}
+                                onClick={() => handleDeleteClick(rec)}
+                                aria-label={`刪除雲端專案 ${rec.project.projectName}`}
+                                className="p-2 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors disabled:opacity-40"
+                              >
+                                {deletingId === rec.id ? (
+                                  <Loader2 className="w-4 h-4 animate-spin" />
+                                ) : (
+                                  <Trash2 className="w-4 h-4" />
+                                )}
+                              </button>
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-2 shrink-0">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                onLoadRecord(rec);
-                                onClose();
-                              }}
-                              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-900 text-white hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
-                            >
-                              <FolderOpen className="w-3.5 h-3.5" />
-                              <span>載入編輯</span>
-                            </button>
-
-                            <button
-                              type="button"
-                              disabled={deletingId === rec.id}
-                              onClick={() => handleDeleteClick(rec)}
-                              aria-label={`刪除雲端專案 ${rec.project.projectName}`}
-                              className="p-2 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors disabled:opacity-40"
-                            >
-                              {deletingId === rec.id ? (
-                                <Loader2 className="w-4 h-4 animate-spin" />
-                              ) : (
-                                <Trash2 className="w-4 h-4" />
-                              )}
-                            </button>
-                          </div>
+                          {shareRec && shareRec.sharedWithEmails.length > 0 && (
+                            <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-600">
+                              <span className="font-medium text-slate-500">已共用給：</span>
+                              {shareRec.sharedWithEmails.map((email) => (
+                                <span
+                                  key={email}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200"
+                                >
+                                  <span>{email}</span>
+                                  <button
+                                    type="button"
+                                    disabled={isSharingBusy}
+                                    onClick={() => handleRevokeEmailClick(shareRec, email)}
+                                    aria-label={`取消共用給 ${email}`}
+                                    title={`取消共用給 ${email}`}
+                                    className="text-slate-400 hover:text-red-600 disabled:opacity-40"
+                                  >
+                                    <X className="w-3 h-3" />
+                                  </button>
+                                </span>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       );
                     })}
+                  </div>
+                )}
+              </div>
+
+              {/* Shared With Me Section */}
+              <div className="space-y-2.5 pt-2 border-t border-slate-200">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-xs font-semibold text-slate-900 flex items-center gap-1.5">
+                    <Users className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>他人共用給我的專案 ({sharedWithMeRecords.length})</span>
+                  </h3>
+                  <span className="text-[11px] text-slate-500">
+                    對方授權您的信箱後即會顯示於此
+                  </span>
+                </div>
+
+                {sharedWithMeRecords.length === 0 ? (
+                  <div className="py-5 px-4 text-center border border-dashed border-slate-200 rounded-xl">
+                    <p className="text-xs text-slate-500">
+                      目前尚無其他帳號共用給 <span className="font-mono font-medium">{user.email}</span> 的專案。
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {sharedWithMeRecords.map((rec) => (
+                      <div
+                        key={rec.id}
+                        className="p-3.5 rounded-xl border border-emerald-200 bg-emerald-50/30 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                      >
+                        <div className="min-w-0 space-y-1">
+                          <div className="flex items-center gap-2">
+                            <p className="text-sm font-semibold text-slate-900 truncate">
+                              {rec.project.projectName}
+                            </p>
+                            <span className="text-[11px] font-medium text-emerald-700 shrink-0">
+                              來自 {rec.ownerDisplayName || '團隊共用'} · 唯讀共用
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-xs text-slate-500 tabular-nums">
+                            <span>
+                              {rec.summary.areaSqMeters.toFixed(2)} m² ({rec.summary.areaPing.toFixed(2)} 坪)
+                            </span>
+                            <span aria-hidden="true">·</span>
+                            <span>{rec.summary.edgeCount} 段牆壁</span>
+                            <span aria-hidden="true">·</span>
+                            <span>{rec.summary.elementCount} 個元件</span>
+                            <span aria-hidden="true">·</span>
+                            <span>同步於 {formatUpdatedAt(rec.updatedAtMs)}</span>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onLoadSharedRecord(rec);
+                            onClose();
+                          }}
+                          className="flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-700 text-white hover:bg-emerald-800 transition-colors whitespace-nowrap shrink-0"
+                        >
+                          <FolderOpen className="w-3.5 h-3.5" />
+                          <span>載入檢視 / 複製</span>
+                        </button>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
