@@ -14,6 +14,7 @@ import {
   FileDown,
   Share2,
   Lock,
+  Receipt,
 } from 'lucide-react';
 import {
   createUserWithEmailAndPassword,
@@ -53,12 +54,20 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { Floorplan2DCanvas, type Floorplan2DHandle } from './components/Floorplan2DCanvas';
 import { Floorplan3DCanvas, type Floorplan3DHandle } from './components/Floorplan3DCanvas';
 import { ParameterSidebar } from './components/ParameterSidebar';
+import { QuotationSheetView } from './components/QuotationSheetView';
 import { ReadOnlySummarySidebar } from './components/ReadOnlySummarySidebar';
 import { ShareModal } from './components/ShareModal';
 import { WallAreaModal } from './components/WallAreaModal';
-import type { FloorplanElement, FloorplanProject, SectionLine, ViewMode } from './types/floorplan';
+import type {
+  FloorplanElement,
+  FloorplanProject,
+  QuoteLineItem,
+  SectionLine,
+  ViewMode,
+} from './types/floorplan';
 import {
   applyAutoCloseToProject,
+  applyLayersToPlacements,
   computeWallSurfaceAreas,
   duplicateElementForPaste,
   flipDoorSwing,
@@ -171,6 +180,7 @@ export default function App() {
     () => initialShared.project.sectionLines?.[0]?.id ?? null
   );
   const [sectionDrawMode, setSectionDrawMode] = useState(false);
+  const [magneticSnapEnabled, setMagneticSnapEnabled] = useState(true);
   const [showDimensions3D, setShowDimensions3D] = useState(true);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [actionToast, setActionToast] = useState<string | null>(null);
@@ -260,6 +270,10 @@ export default function App() {
   const placements = useMemo(
     () => resolveElementPlacements(project.elements, solved),
     [project.elements, solved]
+  );
+  const visiblePlacements = useMemo(
+    () => applyLayersToPlacements(placements, project.layers),
+    [placements, project.layers]
   );
   const wallAreaSummary = useMemo(
     () =>
@@ -601,6 +615,34 @@ export default function App() {
     [previewProject, setProject]
   );
 
+  const handleSlideWallElement = useCallback(
+    (elementId: string, offsetCm: number) => {
+      const apply = interactionBaselineRef.current ? previewProject : setProject;
+      apply((prev) => ({
+        ...prev,
+        elements: prev.elements.map((el) =>
+          el.id === elementId ? { ...el, offsetCm } : el
+        ),
+      }));
+    },
+    [previewProject, setProject]
+  );
+
+  const handleDetachWallElement = useCallback(
+    (elementId: string, xCm: number, yCm: number, rotationDeg: number) => {
+      const apply = interactionBaselineRef.current ? previewProject : setProject;
+      apply((prev) => ({
+        ...prev,
+        elements: prev.elements.map((el) =>
+          el.id === elementId
+            ? { ...el, placement: 'free', xCm, yCm, rotationDeg }
+            : el
+        ),
+      }));
+    },
+    [previewProject, setProject]
+  );
+
   const handleRotateElement = useCallback(
     (elementId: string, rotationDeg: number) => {
       const apply = interactionBaselineRef.current ? previewProject : setProject;
@@ -759,6 +801,16 @@ export default function App() {
     setViewMode('elevation');
   }, []);
 
+  const handleUpdateQuoteItems = useCallback(
+    (updater: (prev: QuoteLineItem[]) => QuoteLineItem[]) => {
+      setProject((prev) => ({
+        ...prev,
+        quoteItems: updater(prev.quoteItems ?? []),
+      }));
+    },
+    [setProject]
+  );
+
   const handleExportPdf = useCallback(async () => {
     if (isExportingPdf) return;
     setIsExportingPdf(true);
@@ -766,7 +818,7 @@ export default function App() {
       const result = await exportFloorplanBundlePdf({
         project,
         solved,
-        placements,
+        placements: visiblePlacements,
         selectedEdgeId,
         selectedElementId,
         showDimensions3D,
@@ -784,7 +836,7 @@ export default function App() {
     isExportingPdf,
     project,
     solved,
-    placements,
+    visiblePlacements,
     selectedEdgeId,
     selectedElementId,
     showDimensions3D,
@@ -796,6 +848,7 @@ export default function App() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (
         isReadOnly ||
+        viewMode === 'quote' ||
         shareModalOpen ||
         cloudModalOpen ||
         wallAreaModalOpen ||
@@ -886,6 +939,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
     isReadOnly,
+    viewMode,
     shareModalOpen,
     cloudModalOpen,
     wallAreaModalOpen,
@@ -1034,7 +1088,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => {
-                if (viewMode === '3d' || viewMode === 'elevation') {
+                if (viewMode === '3d' || viewMode === 'elevation' || viewMode === 'quote') {
                   setViewMode('2d');
                   setTimeout(() => canvas2DRef.current?.exportPng(), 80);
                 } else {
@@ -1190,6 +1244,25 @@ export default function App() {
                       : ''}
                   </span>
                 </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={viewMode === 'quote'}
+                  onClick={() => setViewMode('quote')}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                    viewMode === 'quote'
+                      ? 'bg-white text-emerald-700 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <Receipt className="w-3.5 h-3.5" />
+                  <span>
+                    空白標單
+                    {(project.quoteItems?.length ?? 0) > 0
+                      ? ` (${project.quoteItems!.length})`
+                      : ''}
+                  </span>
+                </button>
               </div>
 
               {/* Undo / Redo History Controls */}
@@ -1257,17 +1330,21 @@ export default function App() {
                 ref={canvas2DRef}
                 project={project}
                 solved={solved}
-                placements={placements}
+                placements={visiblePlacements}
                 selectedEdgeId={selectedEdgeId}
                 selectedElementId={selectedElementId}
                 selectedSectionId={selectedSectionId}
                 sectionDrawMode={isReadOnly ? false : sectionDrawMode}
                 readOnly={isReadOnly}
+                magneticSnapEnabled={magneticSnapEnabled}
+                onToggleMagneticSnap={() => setMagneticSnapEnabled((v) => !v)}
                 onSetSectionDrawMode={isReadOnly ? undefined : setSectionDrawMode}
                 onSelectEdge={setSelectedEdgeId}
                 onSelectElement={setSelectedElementId}
                 onSelectSection={setSelectedSectionId}
                 onMoveElement={isReadOnly ? undefined : handleMoveElement}
+                onSlideWallElement={isReadOnly ? undefined : handleSlideWallElement}
+                onDetachWallElement={isReadOnly ? undefined : handleDetachWallElement}
                 onRotateElement={isReadOnly ? undefined : handleRotateElement}
                 onFlipDoor={isReadOnly ? undefined : handleFlipDoor}
                 onBeginElementInteraction={isReadOnly ? undefined : handleBeginElementInteraction}
@@ -1289,7 +1366,7 @@ export default function App() {
                 ref={canvas3DRef}
                 project={project}
                 solved={solved}
-                placements={placements}
+                placements={visiblePlacements}
                 selectedEdgeId={selectedEdgeId}
                 selectedElementId={selectedElementId}
                 showDimensions3D={showDimensions3D}
@@ -1304,17 +1381,21 @@ export default function App() {
                     ref={canvas2DRef}
                     project={project}
                     solved={solved}
-                    placements={placements}
+                    placements={visiblePlacements}
                     selectedEdgeId={selectedEdgeId}
                     selectedElementId={selectedElementId}
                     selectedSectionId={selectedSectionId}
                     sectionDrawMode={isReadOnly ? false : sectionDrawMode}
                     readOnly={isReadOnly}
+                    magneticSnapEnabled={magneticSnapEnabled}
+                    onToggleMagneticSnap={() => setMagneticSnapEnabled((v) => !v)}
                     onSetSectionDrawMode={isReadOnly ? undefined : setSectionDrawMode}
                     onSelectEdge={setSelectedEdgeId}
                     onSelectElement={setSelectedElementId}
                     onSelectSection={setSelectedSectionId}
                     onMoveElement={isReadOnly ? undefined : handleMoveElement}
+                    onSlideWallElement={isReadOnly ? undefined : handleSlideWallElement}
+                    onDetachWallElement={isReadOnly ? undefined : handleDetachWallElement}
                     onRotateElement={isReadOnly ? undefined : handleRotateElement}
                     onFlipDoor={isReadOnly ? undefined : handleFlipDoor}
                     onBeginElementInteraction={isReadOnly ? undefined : handleBeginElementInteraction}
@@ -1335,7 +1416,7 @@ export default function App() {
                     ref={canvas3DRef}
                     project={project}
                     solved={solved}
-                    placements={placements}
+                    placements={visiblePlacements}
                     selectedEdgeId={selectedEdgeId}
                     selectedElementId={selectedElementId}
                     showDimensions3D={showDimensions3D}
@@ -1349,7 +1430,7 @@ export default function App() {
               <ElevationCanvas
                 project={project}
                 solved={solved}
-                placements={placements}
+                placements={visiblePlacements}
                 selectedSectionId={selectedSectionId}
                 selectedElementId={selectedElementId}
                 readOnly={isReadOnly}
@@ -1366,6 +1447,19 @@ export default function App() {
                         setSectionDrawMode(true);
                       }
                 }
+              />
+            )}
+
+            {viewMode === 'quote' && (
+              <QuotationSheetView
+                project={project}
+                solved={solved}
+                wallAreaSummary={wallAreaSummary}
+                interiorWallFaces={interiorWallFaces}
+                readOnly={isReadOnly}
+                onChangeInteriorWallFaces={setInteriorWallFaces}
+                onUpdateQuoteItems={handleUpdateQuoteItems}
+                onNotify={showToast}
               />
             )}
 

@@ -59,6 +59,10 @@ service cloud.firestore {
         (!data.keys().hasAny(['interiorWalls']) || (data.interiorWalls is list && data.interiorWalls.size() <= 40 && (data.interiorWalls.size() == 0 || data.interiorWalls[0] is map))) &&
         data.elements is list && data.elements.size() <= 120 && (data.elements.size() == 0 || data.elements[0] is map) &&
         (!data.keys().hasAny(['sectionLines']) || (data.sectionLines is list && data.sectionLines.size() <= 20 && (data.sectionLines.size() == 0 || data.sectionLines[0] is map))) &&
+        (!data.keys().hasAny(['wallColor']) || (data.wallColor is string && data.wallColor.size() == 7 && data.wallColor.matches('^#[0-9a-fA-F]{6}$'))) &&
+        (!data.keys().hasAny(['floorColor']) || (data.floorColor is string && data.floorColor.size() == 7 && data.floorColor.matches('^#[0-9a-fA-F]{6}$'))) &&
+        (!data.keys().hasAny(['layers']) || (data.layers is list && data.layers.size() <= 30 && (data.layers.size() == 0 || data.layers[0] is map))) &&
+        (!data.keys().hasAny(['quoteItems']) || (data.quoteItems is list && data.quoteItems.size() <= 200 && (data.quoteItems.size() == 0 || data.quoteItems[0] is map))) &&
         isValidSummary(data.summary) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp && data.updatedAt == request.time;
@@ -94,6 +98,10 @@ service cloud.firestore {
           'interiorWalls',
           'elements',
           'sectionLines',
+          'wallColor',
+          'floorColor',
+          'layers',
+          'quoteItems',
           'summary',
           'createdAt',
           'updatedAt'
@@ -140,6 +148,10 @@ service cloud.firestore {
           'interiorWalls',
           'elements',
           'sectionLines',
+          'wallColor',
+          'floorColor',
+          'layers',
+          'quoteItems',
           'summary',
           'createdAt',
           'updatedAt'
@@ -201,6 +213,10 @@ service cloud.firestore {
             'interiorWalls',
             'elements',
             'sectionLines',
+            'wallColor',
+            'floorColor',
+            'layers',
+            'quoteItems',
             'summary',
             'updatedAt'
           ]);
@@ -247,6 +263,10 @@ service cloud.firestore {
               'interiorWalls',
               'elements',
               'sectionLines',
+              'wallColor',
+              'floorColor',
+              'layers',
+              'quoteItems',
               'summary',
               'updatedAt'
             ])
@@ -271,6 +291,10 @@ service cloud.firestore {
               'interiorWalls',
               'elements',
               'sectionLines',
+              'wallColor',
+              'floorColor',
+              'layers',
+              'quoteItems',
               'summary',
               'updatedAt'
             ])

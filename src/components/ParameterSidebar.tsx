@@ -14,12 +14,29 @@ import {
   BedDouble,
   Armchair,
   Table2,
+  PanelTop,
+  Toilet,
+  Droplets,
+  ShowerHead,
+  Bath,
+  Columns2,
+  Circle,
+  Sofa,
+  Utensils,
+  Palette,
+  ChevronDown,
+  ChevronRight,
+  Eye,
+  EyeOff,
+  Layers,
 } from 'lucide-react';
 import type {
   DoorSwing,
+  ElementCategoryId,
   ElementKind,
   ElementPlacementMode,
   FloorplanElement,
+  FloorplanLayer,
   FloorplanProject,
   InteriorWall,
   SolvedFloorplan,
@@ -28,10 +45,22 @@ import type {
 } from '../types/floorplan';
 import {
   buildDoorSwing,
+  DEFAULT_FLOOR_COLOR,
+  DEFAULT_FLOORPLAN_LAYERS,
+  DEFAULT_WALL_COLOR,
+  ELEMENT_CATEGORIES,
+  ELEMENT_COLOR_PRESETS,
   ELEMENT_KIND_DEFAULTS,
+  FLOOR_COLOR_PRESETS,
   formatDimension,
+  getDefaultLayerIdForKind,
+  getEffectiveLayers,
   parseDoorSwing,
+  resolveElementEffectiveColor,
+  resolveElementLayer,
   rotateElementAngle,
+  sanitizeHexColor,
+  WALL_COLOR_PRESETS,
 } from '../utils/floorplanGeometry';
 
 interface ParameterSidebarProps {
@@ -79,6 +108,11 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [activeTab, setActiveTab] = useState<'edges' | 'elements'>('edges');
+  const [elementCategoryFilter, setElementCategoryFilter] = useState<'all' | ElementCategoryId>('all');
+  const [layerFilter, setLayerFilter] = useState<string>('all');
+  const [layersPanelOpen, setLayersPanelOpen] = useState<boolean>(true);
+  const [expandedElementIds, setExpandedElementIds] = useState<Record<string, boolean>>({});
+  const [newLayerName, setNewLayerName] = useState<string>('');
   const [uploadedPreview, setUploadedPreview] = useState<{
     name: string;
     mimeType: string;
@@ -214,34 +248,159 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
     });
   };
 
+  const effectiveLayers = getEffectiveLayers(project.layers);
+
+  const toggleElementExpanded = (elId: string) => {
+    setExpandedElementIds((prev) => ({ ...prev, [elId]: !prev[elId] }));
+  };
+
+  const setAllElementsExpanded = (expanded: boolean) => {
+    if (!expanded) {
+      setExpandedElementIds({});
+      return;
+    }
+    const next: Record<string, boolean> = {};
+    for (const el of project.elements) {
+      next[el.id] = true;
+    }
+    setExpandedElementIds(next);
+  };
+
+  const toggleLayerVisibility = (layerId: string) => {
+    onUpdateProject((prev) => {
+      const base = getEffectiveLayers(prev.layers);
+      return {
+        ...prev,
+        layers: base.map((l) => (l.id === layerId ? { ...l, visible: !l.visible } : l)),
+      };
+    });
+  };
+
+  const setAllLayersVisibility = (visible: boolean) => {
+    onUpdateProject((prev) => {
+      const base = getEffectiveLayers(prev.layers);
+      return {
+        ...prev,
+        layers: base.map((l) => ({ ...l, visible })),
+      };
+    });
+  };
+
+  const setLayerUniformColor = (layerId: string, colorHex?: string) => {
+    const cleanHex = sanitizeHexColor(colorHex);
+    onUpdateProject((prev) => {
+      const base = getEffectiveLayers(prev.layers);
+      const nextLayers: FloorplanLayer[] = base.map((l) => {
+        if (l.id !== layerId) return l;
+        const copy: FloorplanLayer = { id: l.id, name: l.name, visible: l.visible };
+        if (cleanHex) copy.color = cleanHex;
+        return copy;
+      });
+      // Clear per-element override for elements on this layer so uniform layer coloring applies immediately
+      const nextElements = prev.elements.map((el) => {
+        const ownerLayer = resolveElementLayer(el, base);
+        if (ownerLayer?.id !== layerId) return el;
+        if (!el.color) return el;
+        const rest = { ...el };
+        delete rest.color;
+        return rest;
+      });
+      return {
+        ...prev,
+        layers: nextLayers,
+        elements: nextElements,
+      };
+    });
+  };
+
+  const renameLayer = (layerId: string, name: string) => {
+    onUpdateProject((prev) => {
+      const base = getEffectiveLayers(prev.layers);
+      return {
+        ...prev,
+        layers: base.map((l) => (l.id === layerId ? { ...l, name } : l)),
+      };
+    });
+  };
+
+  const addCustomLayer = () => {
+    const trimmed = newLayerName.trim();
+    onUpdateProject((prev) => {
+      const base = getEffectiveLayers(prev.layers);
+      const layerNum = base.length + 1;
+      const newLayer: FloorplanLayer = {
+        id: `layer-custom-${Date.now().toString(36)}`,
+        name: trimmed || `自訂圖層 ${layerNum}`,
+        visible: true,
+      };
+      return {
+        ...prev,
+        layers: [...base, newLayer],
+      };
+    });
+    setNewLayerName('');
+  };
+
+  const deleteCustomLayer = (layerId: string) => {
+    onUpdateProject((prev) => {
+      const base = getEffectiveLayers(prev.layers);
+      if (base.length <= 1) return prev;
+      const remaining = base.filter((l) => l.id !== layerId);
+      const fallbackLayerId = remaining[0].id;
+      return {
+        ...prev,
+        layers: remaining,
+        elements: prev.elements.map((el) =>
+          resolveElementLayer(el, base)?.id === layerId
+            ? { ...el, layerId: fallbackLayerId }
+            : el
+        ),
+      };
+    });
+    setLayerFilter((curr) => (curr === layerId ? 'all' : curr));
+  };
+
   const addElement = (kind: ElementKind) => {
     const defaults = ELEMENT_KIND_DEFAULTS[kind];
     const centerX = Math.round(solved.bounds.centerX);
     const centerY = Math.round(solved.bounds.centerY);
+    const newId = `el-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     onUpdateProject((prev) => {
       const targetEdgeId =
         selectedEdgeId || prev.edges[0]?.id || prev.interiorWalls?.[0]?.id || '';
       if (!targetEdgeId && defaults.defaultPlacement === 'wall') return prev;
+      const baseLayers = getEffectiveLayers(prev.layers);
+      const assignedLayerId =
+        layerFilter !== 'all' && baseLayers.some((l) => l.id === layerFilter)
+          ? layerFilter
+          : getDefaultLayerIdForKind(kind, baseLayers);
+      const freeCount = prev.elements.filter((e) => e.placement === 'free').length;
+      const staggerX = ((freeCount % 3) - 1) * 75;
+      const staggerY = ((Math.floor(freeCount / 3) % 3) - 1) * 75;
       const newEl: FloorplanElement = {
-        id: `el-${Date.now()}`,
+        id: newId,
         kind,
         name: defaults.label,
         placement: defaults.defaultPlacement,
         edgeId: targetEdgeId,
         offsetCm: 20,
-        xCm: centerX,
-        yCm: centerY,
+        xCm: centerX + staggerX,
+        yCm: centerY + staggerY,
         rotationDeg: 0,
         widthCm: defaults.widthCm,
         depthCm: kind === 'door' || kind === 'window' ? prev.wallThicknessCm : defaults.depthCm,
         heightCm: defaults.heightCm,
         elevationCm: defaults.elevationCm,
         side: 'inside',
+        layerId: assignedLayerId,
         ...(kind === 'door' ? { swingDirection: 'inward-right' as DoorSwing } : {}),
         ...(kind === 'bed' ? { showClearance: true } : {}),
       };
       return { ...prev, elements: [...prev.elements, newEl] };
     });
+    setExpandedElementIds((prev) => ({ ...prev, [newId]: true }));
+    onSelectElement(newId);
+    onSelectEdge(null);
     setActiveTab('elements');
   };
 
@@ -471,6 +630,135 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
               }
               className="w-full px-2.5 py-1.5 text-sm font-mono tabular-nums border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
+          </div>
+        </div>
+
+        {/* Wall & Floor Surface Colors */}
+        <div className="pt-2 border-t border-slate-100 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="flex items-center gap-1.5 text-xs font-medium text-slate-700">
+              <Palette className="w-3.5 h-3.5 text-slate-500" />
+              <span>空間色彩設定</span>
+            </span>
+            {(project.wallColor || project.floorColor) && (
+              <button
+                type="button"
+                onClick={() =>
+                  onUpdateProject((p) => ({
+                    ...p,
+                    wallColor: undefined,
+                    floorColor: undefined,
+                  }))
+                }
+                className="text-[11px] text-slate-500 hover:text-slate-800 underline decoration-slate-300 whitespace-nowrap shrink-0"
+              >
+                全部恢復預設
+              </button>
+            )}
+          </div>
+
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] text-slate-600 shrink-0">牆面色彩</span>
+              <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                {WALL_COLOR_PRESETS.map((preset) => {
+                  const activeHex = sanitizeHexColor(project.wallColor) ?? DEFAULT_WALL_COLOR;
+                  const isSelected = activeHex === preset.hex;
+                  return (
+                    <button
+                      key={preset.hex}
+                      type="button"
+                      title={preset.label}
+                      aria-label={`牆面色彩：${preset.label}`}
+                      onClick={() =>
+                        onUpdateProject((p) => ({ ...p, wallColor: preset.hex }))
+                      }
+                      className={`w-5 h-5 rounded border transition-transform ${
+                        isSelected
+                          ? 'border-blue-600 ring-2 ring-blue-500/40 scale-110'
+                          : 'border-slate-300 hover:scale-105'
+                      }`}
+                      style={{ backgroundColor: preset.hex }}
+                    />
+                  );
+                })}
+                <input
+                  type="color"
+                  aria-label="自訂牆面色彩"
+                  title="自訂牆面色彩"
+                  value={sanitizeHexColor(project.wallColor) ?? DEFAULT_WALL_COLOR}
+                  onChange={(e) =>
+                    onUpdateProject((p) => ({
+                      ...p,
+                      wallColor: sanitizeHexColor(e.target.value),
+                    }))
+                  }
+                  className="w-5 h-5 p-0 border border-slate-300 rounded cursor-pointer bg-transparent"
+                />
+                {project.wallColor && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onUpdateProject((p) => ({ ...p, wallColor: undefined }))
+                    }
+                    className="px-1.5 py-0.5 text-[10.5px] rounded border border-slate-200 text-slate-600 hover:bg-slate-100 whitespace-nowrap shrink-0"
+                  >
+                    預設
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] text-slate-600 shrink-0">地面色彩</span>
+              <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                {FLOOR_COLOR_PRESETS.map((preset) => {
+                  const activeHex = sanitizeHexColor(project.floorColor) ?? DEFAULT_FLOOR_COLOR;
+                  const isSelected = activeHex === preset.hex;
+                  return (
+                    <button
+                      key={preset.hex}
+                      type="button"
+                      title={preset.label}
+                      aria-label={`地面色彩：${preset.label}`}
+                      onClick={() =>
+                        onUpdateProject((p) => ({ ...p, floorColor: preset.hex }))
+                      }
+                      className={`w-5 h-5 rounded border transition-transform ${
+                        isSelected
+                          ? 'border-blue-600 ring-2 ring-blue-500/40 scale-110'
+                          : 'border-slate-300 hover:scale-105'
+                      }`}
+                      style={{ backgroundColor: preset.hex }}
+                    />
+                  );
+                })}
+                <input
+                  type="color"
+                  aria-label="自訂地面色彩"
+                  title="自訂地面色彩"
+                  value={sanitizeHexColor(project.floorColor) ?? DEFAULT_FLOOR_COLOR}
+                  onChange={(e) =>
+                    onUpdateProject((p) => ({
+                      ...p,
+                      floorColor: sanitizeHexColor(e.target.value),
+                    }))
+                  }
+                  className="w-5 h-5 p-0 border border-slate-300 rounded cursor-pointer bg-transparent"
+                />
+                {project.floorColor && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onUpdateProject((p) => ({ ...p, floorColor: undefined }))
+                    }
+                    className="px-1.5 py-0.5 text-[10.5px] rounded border border-slate-200 text-slate-600 hover:bg-slate-100 whitespace-nowrap shrink-0"
+                  >
+                    預設
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
         </div>
 
@@ -885,55 +1173,315 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
           </div>
         ) : (
           <div className="space-y-2.5">
+            {/* Element Category Tabs */}
+            <div
+              role="tablist"
+              aria-label="元件分類篩選"
+              className="flex flex-wrap items-center gap-1 bg-slate-100 p-1 rounded-lg"
+            >
+              <button
+                type="button"
+                role="tab"
+                aria-selected={elementCategoryFilter === 'all'}
+                onClick={() => setElementCategoryFilter('all')}
+                className={`px-2 py-1 text-[11px] font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
+                  elementCategoryFilter === 'all'
+                    ? 'bg-white text-slate-900 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                全部
+              </button>
+              {ELEMENT_CATEGORIES.map((cat) => (
+                <button
+                  key={cat.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={elementCategoryFilter === cat.id}
+                  onClick={() => setElementCategoryFilter(cat.id)}
+                  className={`px-2 py-1 text-[11px] font-medium rounded-md transition-colors whitespace-nowrap shrink-0 ${
+                    elementCategoryFilter === cat.id
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  {cat.label}
+                </button>
+              ))}
+            </div>
+
             <div className="flex flex-wrap items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => addElement('door')}
-                className="flex items-center gap-1 px-2 py-1.5 rounded-md text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 transition-colors whitespace-nowrap shrink-0"
-              >
-                <DoorOpen className="w-3.5 h-3.5" />
-                <span>+ 門</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => addElement('window')}
-                className="flex items-center gap-1 px-2 py-1.5 rounded-md text-xs font-medium bg-sky-50 text-sky-700 border border-sky-200 hover:bg-sky-100 transition-colors whitespace-nowrap shrink-0"
-              >
-                <Square className="w-3.5 h-3.5" />
-                <span>+ 窗戶</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => addElement('cabinet')}
-                className="flex items-center gap-1 px-2 py-1.5 rounded-md text-xs font-medium bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 transition-colors whitespace-nowrap shrink-0"
-              >
-                <Box className="w-3.5 h-3.5" />
-                <span>+ 櫃體</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => addElement('table')}
-                className="flex items-center gap-1 px-2 py-1.5 rounded-md text-xs font-medium bg-yellow-50 text-yellow-800 border border-yellow-200 hover:bg-yellow-100 transition-colors whitespace-nowrap shrink-0"
-              >
-                <Table2 className="w-3.5 h-3.5" />
-                <span>+ 桌子</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => addElement('chair')}
-                className="flex items-center gap-1 px-2 py-1.5 rounded-md text-xs font-medium bg-slate-100 text-slate-700 border border-slate-200 hover:bg-slate-200 transition-colors whitespace-nowrap shrink-0"
-              >
-                <Armchair className="w-3.5 h-3.5" />
-                <span>+ 椅子</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => addElement('bed')}
-                className="flex items-center gap-1 px-2 py-1.5 rounded-md text-xs font-medium bg-teal-50 text-teal-800 border border-teal-200 hover:bg-teal-100 transition-colors whitespace-nowrap shrink-0"
-              >
-                <BedDouble className="w-3.5 h-3.5" />
-                <span>+ 病床</span>
-              </button>
+              {(
+                [
+                  {
+                    kind: 'door',
+                    label: '+ 門',
+                    icon: <DoorOpen className="w-3.5 h-3.5" />,
+                    cls: 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100',
+                  },
+                  {
+                    kind: 'window',
+                    label: '+ 窗戶',
+                    icon: <Square className="w-3.5 h-3.5" />,
+                    cls: 'bg-sky-50 text-sky-700 border-sky-200 hover:bg-sky-100',
+                  },
+                  {
+                    kind: 'table',
+                    label: '+ 桌子',
+                    icon: <Table2 className="w-3.5 h-3.5" />,
+                    cls: 'bg-yellow-50 text-yellow-800 border-yellow-200 hover:bg-yellow-100',
+                  },
+                  {
+                    kind: 'round_table',
+                    label: '+ 圓桌',
+                    icon: <Circle className="w-3.5 h-3.5" />,
+                    cls: 'bg-yellow-50 text-yellow-800 border-yellow-200 hover:bg-yellow-100',
+                  },
+                  {
+                    kind: 'chair',
+                    label: '+ 椅子',
+                    icon: <Armchair className="w-3.5 h-3.5" />,
+                    cls: 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200',
+                  },
+                  {
+                    kind: 'sofa',
+                    label: '+ 沙發',
+                    icon: <Sofa className="w-3.5 h-3.5" />,
+                    cls: 'bg-indigo-50 text-indigo-800 border-indigo-200 hover:bg-indigo-100',
+                  },
+                  {
+                    kind: 'cabinet',
+                    label: '+ 櫃體',
+                    icon: <Box className="w-3.5 h-3.5" />,
+                    cls: 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100',
+                  },
+                  {
+                    kind: 'wall_cabinet',
+                    label: '+ 吊櫃',
+                    icon: <PanelTop className="w-3.5 h-3.5" />,
+                    cls: 'bg-orange-50 text-orange-800 border-orange-200 hover:bg-orange-100',
+                  },
+                  {
+                    kind: 'kitchen_counter',
+                    label: '+ 廚房一字櫥櫃',
+                    icon: <Utensils className="w-3.5 h-3.5" />,
+                    cls: 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100',
+                  },
+                  {
+                    kind: 'toilet',
+                    label: '+ 馬桶',
+                    icon: <Toilet className="w-3.5 h-3.5" />,
+                    cls: 'bg-cyan-50 text-cyan-800 border-cyan-200 hover:bg-cyan-100',
+                  },
+                  {
+                    kind: 'urinal',
+                    label: '+ 小便斗',
+                    icon: <Droplets className="w-3.5 h-3.5" />,
+                    cls: 'bg-cyan-50 text-cyan-800 border-cyan-200 hover:bg-cyan-100',
+                  },
+                  {
+                    kind: 'shower',
+                    label: '+ 蓮蓬頭',
+                    icon: <ShowerHead className="w-3.5 h-3.5" />,
+                    cls: 'bg-indigo-50 text-indigo-800 border-indigo-200 hover:bg-indigo-100',
+                  },
+                  {
+                    kind: 'sink',
+                    label: '+ 洗手台',
+                    icon: <Bath className="w-3.5 h-3.5" />,
+                    cls: 'bg-sky-50 text-sky-800 border-sky-200 hover:bg-sky-100',
+                  },
+                  {
+                    kind: 'bed',
+                    label: '+ 病床',
+                    icon: <BedDouble className="w-3.5 h-3.5" />,
+                    cls: 'bg-teal-50 text-teal-800 border-teal-200 hover:bg-teal-100',
+                  },
+                  {
+                    kind: 'bed_curtain',
+                    label: '+ 病床隔簾(L型)',
+                    icon: <Columns2 className="w-3.5 h-3.5" />,
+                    cls: 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100',
+                  },
+                ] as Array<{
+                  kind: ElementKind;
+                  label: string;
+                  icon: React.ReactNode;
+                  cls: string;
+                }>
+              )
+                .filter(
+                  (btn) =>
+                    elementCategoryFilter === 'all' ||
+                    ELEMENT_KIND_DEFAULTS[btn.kind].category === elementCategoryFilter
+                )
+                .map((btn) => (
+                  <button
+                    key={btn.kind}
+                    type="button"
+                    onClick={() => addElement(btn.kind)}
+                    className={`flex items-center gap-1 px-2 py-1.5 rounded-md text-xs font-medium border transition-colors whitespace-nowrap shrink-0 ${btn.cls}`}
+                  >
+                    {btn.icon}
+                    <span>{btn.label}</span>
+                  </button>
+                ))}
+            </div>
+
+            {/* Layer Management Panel */}
+            <div
+              data-testid="layers-panel"
+              className="border border-slate-200 rounded-lg bg-slate-50/70 overflow-hidden"
+            >
+              <div className="px-2.5 py-2 flex items-center justify-between gap-2 bg-white border-b border-slate-100">
+                <button
+                  type="button"
+                  aria-expanded={layersPanelOpen}
+                  onClick={() => setLayersPanelOpen((v) => !v)}
+                  className="flex items-center gap-1.5 text-xs font-semibold text-slate-900 min-w-0"
+                >
+                  {layersPanelOpen ? (
+                    <ChevronDown className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                  ) : (
+                    <ChevronRight className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                  )}
+                  <Layers className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                  <span className="truncate">圖層管理 ({effectiveLayers.length})</span>
+                </button>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setAllLayersVisibility(true)}
+                    className="px-1.5 py-0.5 text-[10.5px] text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded whitespace-nowrap shrink-0"
+                  >
+                    全部顯示
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAllLayersVisibility(false)}
+                    className="px-1.5 py-0.5 text-[10.5px] text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded whitespace-nowrap shrink-0"
+                  >
+                    全部隱藏
+                  </button>
+                </div>
+              </div>
+
+              {layersPanelOpen && (
+                <div className="p-2 space-y-1.5">
+                  <div className="divide-y divide-slate-200/80 border border-slate-200 rounded-md bg-white">
+                    {effectiveLayers.map((layer) => {
+                      const count = project.elements.filter(
+                        (el) => resolveElementLayer(el, effectiveLayers)?.id === layer.id
+                      ).length;
+                      const isBuiltIn = DEFAULT_FLOORPLAN_LAYERS.some((d) => d.id === layer.id);
+                      const isFiltered = layerFilter === layer.id;
+                      return (
+                        <div
+                          key={layer.id}
+                          data-testid={`layer-row-${layer.id}`}
+                          className={`px-2 py-1.5 flex items-center gap-1.5 ${
+                            isFiltered ? 'bg-blue-50/50' : ''
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => toggleLayerVisibility(layer.id)}
+                            aria-label={`${layer.visible ? '隱藏' : '顯示'}圖層 ${layer.name}`}
+                            title={layer.visible ? '點擊隱藏整個圖層' : '點擊顯示整個圖層'}
+                            className={`p-1 rounded border transition-colors shrink-0 ${
+                              layer.visible
+                                ? 'text-slate-700 border-slate-200 bg-white hover:bg-slate-100'
+                                : 'text-slate-400 border-slate-200 bg-slate-100 hover:text-slate-700'
+                            }`}
+                          >
+                            {layer.visible ? (
+                              <Eye className="w-3.5 h-3.5" />
+                            ) : (
+                              <EyeOff className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+
+                          <input
+                            type="text"
+                            value={layer.name}
+                            aria-label={`圖層名稱 ${layer.name}`}
+                            onChange={(e) => renameLayer(layer.id, e.target.value)}
+                            className={`flex-1 min-w-0 px-1.5 py-0.5 text-xs bg-transparent border border-transparent hover:border-slate-200 focus:border-blue-400 focus:bg-white rounded focus:outline-none ${
+                              layer.visible ? 'font-medium text-slate-800' : 'text-slate-400 line-through'
+                            }`}
+                          />
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setLayerFilter((curr) => (curr === layer.id ? 'all' : layer.id))
+                            }
+                            title={isFiltered ? '取消圖層篩選' : '只顯示此圖層元件'}
+                            className={`text-[10.5px] font-mono tabular-nums px-1.5 py-0.5 rounded whitespace-nowrap shrink-0 ${
+                              isFiltered
+                                ? 'bg-blue-600 text-white font-semibold'
+                                : 'text-slate-500 hover:bg-slate-100'
+                            }`}
+                          >
+                            {count}件
+                          </button>
+
+                          <input
+                            type="color"
+                            aria-label={`${layer.name} 統一色彩`}
+                            title={`設定「${layer.name}」統一顏色`}
+                            value={sanitizeHexColor(layer.color) ?? '#d9b382'}
+                            onChange={(e) => setLayerUniformColor(layer.id, e.target.value)}
+                            className="w-4 h-4 p-0 border border-slate-300 rounded cursor-pointer bg-transparent shrink-0"
+                          />
+
+                          {layer.color && (
+                            <button
+                              type="button"
+                              onClick={() => setLayerUniformColor(layer.id, undefined)}
+                              title="清除此圖層統一色彩"
+                              className="px-1 py-0.5 text-[10px] text-slate-600 hover:bg-slate-100 border border-slate-200 rounded whitespace-nowrap shrink-0"
+                            >
+                              預設
+                            </button>
+                          )}
+
+                          {!isBuiltIn && effectiveLayers.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => deleteCustomLayer(layer.id)}
+                              aria-label={`刪除圖層 ${layer.name}`}
+                              className="p-0.5 text-slate-400 hover:text-red-600 shrink-0"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Quick Add Layer */}
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      value={newLayerName}
+                      onChange={(e) => setNewLayerName(e.target.value)}
+                      placeholder="新圖層名稱（如：照明/弱電）"
+                      aria-label="新圖層名稱"
+                      className="flex-1 min-w-0 px-2 py-1 text-xs bg-white border border-slate-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={addCustomLayer}
+                      className="flex items-center gap-1 px-2 py-1 text-[11px] font-medium bg-white text-slate-700 border border-slate-200 hover:bg-slate-100 rounded whitespace-nowrap shrink-0"
+                    >
+                      <Plus className="w-3 h-3" />
+                      <span>新增圖層</span>
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             {project.elements.length === 0 ? (
@@ -941,70 +1489,184 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
                 目前尚未設定門窗或家具元件，請點擊上方按鈕新增。
               </p>
             ) : (
-              <div className="space-y-2.5">
-                {project.elements.map((el) => {
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2 px-0.5">
+                  <div className="flex items-center gap-1.5 text-[11px] text-slate-500 min-w-0">
+                    <span>
+                      已配置 {project.elements.length} 項
+                      {layerFilter !== 'all'
+                        ? ` · 篩選：${effectiveLayers.find((l) => l.id === layerFilter)?.name ?? ''}`
+                        : ''}
+                    </span>
+                    {layerFilter !== 'all' && (
+                      <button
+                        type="button"
+                        onClick={() => setLayerFilter('all')}
+                        className="text-blue-600 hover:underline whitespace-nowrap shrink-0"
+                      >
+                        顯示全部
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setAllElementsExpanded(true)}
+                      className="px-1.5 py-0.5 text-[10.5px] text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded whitespace-nowrap shrink-0"
+                    >
+                      全部展開
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAllElementsExpanded(false)}
+                      className="px-1.5 py-0.5 text-[10.5px] text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded whitespace-nowrap shrink-0"
+                    >
+                      全部收合
+                    </button>
+                  </div>
+                </div>
+
+                {project.elements
+                  .filter((el) =>
+                    layerFilter === 'all'
+                      ? true
+                      : resolveElementLayer(el, effectiveLayers)?.id === layerFilter
+                  )
+                  .map((el) => {
                   const isSelected = selectedElementId === el.id;
+                  const isExpanded = Boolean(expandedElementIds[el.id]);
                   const isOpening = el.kind === 'door' || el.kind === 'window';
                   const placementMode: ElementPlacementMode =
                     !isOpening && el.placement === 'free' ? 'free' : 'wall';
+                  const assignedLayer = resolveElementLayer(el, effectiveLayers);
+                  const effectiveColor = resolveElementEffectiveColor(el, effectiveLayers);
+                  const isLayerHidden = assignedLayer ? !assignedLayer.visible : false;
+
                   return (
                     <div
                       key={el.id}
+                      data-testid={`element-card-${el.id}`}
                       onClick={() => {
                         onSelectElement(el.id);
                         onSelectEdge(null);
                       }}
-                      className={`p-2.5 rounded-lg border space-y-2 transition-colors ${
+                      className={`rounded-lg border transition-colors ${
                         isSelected
                           ? 'border-blue-500 bg-blue-50/40'
                           : 'border-slate-200 bg-white hover:border-slate-300'
                       }`}
                     >
-                      <div className="flex items-center gap-2">
-                        <select
-                          value={el.kind}
-                          aria-label={`${el.name} 元件類型`}
-                          onChange={(e) => {
-                            const nextKind = e.target.value as ElementKind;
-                            const nextDefs = ELEMENT_KIND_DEFAULTS[nextKind];
-                            updateElement(el.id, {
-                              kind: nextKind,
-                              ...(nextKind === 'door' || nextKind === 'window'
-                                ? { placement: 'wall' }
-                                : {}),
-                              ...(nextKind === 'bed' && el.showClearance === undefined
-                                ? { showClearance: nextDefs.showClearance ?? true }
-                                : {}),
-                            });
-                          }}
-                          className="px-2 py-1 text-xs font-medium bg-slate-50 border border-slate-200 rounded"
-                        >
-                          <option value="door">門</option>
-                          <option value="window">窗戶</option>
-                          <option value="cabinet">櫃體</option>
-                          <option value="table">桌子</option>
-                          <option value="chair">椅子</option>
-                          <option value="bed">病床</option>
-                        </select>
-                        <input
-                          type="text"
-                          value={el.name}
-                          aria-label={`元件名稱 ${el.name}`}
-                          onChange={(e) => updateElement(el.id, { name: e.target.value })}
-                          className="flex-1 min-w-0 px-2 py-1 text-xs font-medium border border-slate-200 rounded"
-                        />
+                      {/* Compact Header Row: Collapsed by default showing name + concise summary */}
+                      <div className="px-2.5 py-2 flex items-center justify-between gap-2">
                         <button
                           type="button"
+                          aria-expanded={isExpanded}
+                          aria-label={`${isExpanded ? '收合' : '展開'} ${el.name}`}
                           onClick={(e) => {
                             e.stopPropagation();
-                            removeElement(el.id);
+                            toggleElementExpanded(el.id);
+                            onSelectElement(el.id);
+                            onSelectEdge(null);
                           }}
-                          aria-label={`刪除 ${el.name}`}
-                          className="p-1 text-slate-400 hover:text-red-600 transition-colors"
+                          className="flex items-center gap-1.5 min-w-0 flex-1 text-left"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
+                          {isExpanded ? (
+                            <ChevronDown className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                          ) : (
+                            <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                          )}
+                          <span
+                            className="w-2.5 h-2.5 rounded-full border border-slate-300 shrink-0"
+                            style={{ backgroundColor: effectiveColor ?? '#e2e8f0' }}
+                          />
+                          <span
+                            className={`text-xs font-semibold truncate ${
+                              isLayerHidden ? 'text-slate-400 line-through' : 'text-slate-900'
+                            }`}
+                          >
+                            {el.name}
+                          </span>
                         </button>
+
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <span className="text-[11px] text-slate-500 font-mono tabular-nums whitespace-nowrap">
+                            {Math.round(el.widthCm)}×{Math.round(el.depthCm)}×{Math.round(el.heightCm)}
+                          </span>
+                          {isLayerHidden && (
+                            <span className="text-[10px] text-amber-700 font-medium whitespace-nowrap">
+                              隱藏
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              removeElement(el.id);
+                            }}
+                            aria-label={`刪除 ${el.name}`}
+                            className="p-1 text-slate-400 hover:text-red-600 transition-colors"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </div>
+
+                      {isExpanded && (
+                        <div className="px-2.5 pb-2.5 pt-2 border-t border-slate-100 space-y-2">
+                          <div className="flex items-center gap-2">
+                            <select
+                              value={el.kind}
+                              aria-label={`${el.name} 元件類型`}
+                              onChange={(e) => {
+                                const nextKind = e.target.value as ElementKind;
+                                const nextDefs = ELEMENT_KIND_DEFAULTS[nextKind];
+                                updateElement(el.id, {
+                                  kind: nextKind,
+                                  ...(nextKind === 'door' || nextKind === 'window'
+                                    ? { placement: 'wall' }
+                                    : {}),
+                                  ...(nextKind === 'bed' && el.showClearance === undefined
+                                    ? { showClearance: nextDefs.showClearance ?? true }
+                                    : {}),
+                                });
+                              }}
+                              className="px-2 py-1 text-xs font-medium bg-slate-50 border border-slate-200 rounded"
+                            >
+                              {ELEMENT_CATEGORIES.map((cat) => (
+                                <optgroup key={cat.id} label={cat.label}>
+                                  {cat.kinds.map((k) => (
+                                    <option key={k} value={k}>
+                                      {ELEMENT_KIND_DEFAULTS[k].label}
+                                    </option>
+                                  ))}
+                                </optgroup>
+                              ))}
+                            </select>
+                            <input
+                              type="text"
+                              value={el.name}
+                              aria-label={`元件名稱 ${el.name}`}
+                              onChange={(e) => updateElement(el.id, { name: e.target.value })}
+                              className="flex-1 min-w-0 px-2 py-1 text-xs font-medium border border-slate-200 rounded"
+                            />
+                          </div>
+
+                          <div className="flex items-center justify-between gap-2">
+                            <label className="text-[11px] text-slate-500 shrink-0">所屬圖層</label>
+                            <select
+                              value={assignedLayer?.id ?? ''}
+                              aria-label={`${el.name} 所屬圖層`}
+                              onChange={(e) => updateElement(el.id, { layerId: e.target.value })}
+                              className="flex-1 max-w-[200px] px-2 py-1 text-xs bg-white border border-slate-200 rounded"
+                            >
+                              {effectiveLayers.map((layer) => (
+                                <option key={layer.id} value={layer.id}>
+                                  {layer.name}
+                                  {!layer.visible ? ' (已隱藏)' : ''}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
 
                       {!isOpening && (
                         <div className="flex items-center justify-between gap-2">
@@ -1508,6 +2170,58 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
                         </div>
                       )}
 
+                      {/* Element Color Selector */}
+                      <div
+                        className="flex items-center justify-between gap-2 pt-0.5"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <span className="flex items-center gap-1 text-[11px] text-slate-500 shrink-0">
+                          <Palette className="w-3 h-3" />
+                          <span>物品色彩</span>
+                        </span>
+                        <div className="flex items-center gap-1 flex-wrap justify-end">
+                          {ELEMENT_COLOR_PRESETS.map((preset) => {
+                            const active = sanitizeHexColor(el.color) === preset.hex;
+                            return (
+                              <button
+                                key={preset.hex}
+                                type="button"
+                                title={preset.label}
+                                aria-label={`${el.name} 色彩：${preset.label}`}
+                                onClick={() => updateElement(el.id, { color: preset.hex })}
+                                className={`w-4 h-4 rounded border transition-transform ${
+                                  active
+                                    ? 'border-blue-600 ring-2 ring-blue-500/40 scale-110'
+                                    : 'border-slate-300 hover:scale-105'
+                                }`}
+                                style={{ backgroundColor: preset.hex }}
+                              />
+                            );
+                          })}
+                          <input
+                            type="color"
+                            aria-label={`${el.name} 自訂色彩`}
+                            title={`${el.name} 自訂色彩`}
+                            value={sanitizeHexColor(el.color) ?? '#d9b382'}
+                            onChange={(e) =>
+                              updateElement(el.id, {
+                                color: sanitizeHexColor(e.target.value),
+                              })
+                            }
+                            className="w-4 h-4 p-0 border border-slate-300 rounded cursor-pointer bg-transparent"
+                          />
+                          {el.color && (
+                            <button
+                              type="button"
+                              onClick={() => updateElement(el.id, { color: undefined })}
+                              className="px-1.5 py-0.5 text-[10px] rounded border border-slate-200 text-slate-600 hover:bg-slate-100 whitespace-nowrap shrink-0"
+                            >
+                              預設
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
                       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-0.5">
                         <label className="flex items-center gap-1.5 text-xs text-teal-800 cursor-pointer">
                           <input
@@ -1534,6 +2248,8 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
                           </label>
                         )}
                       </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}

@@ -2,21 +2,43 @@ import type {
   DoorSwing,
   ElementKind,
   FloorplanElement,
+  FloorplanLayer,
   FloorplanProject,
   InteriorWall,
+  QuoteAreaUnit,
+  QuoteLineItem,
+  QuoteSurfaceTarget,
   SectionLine,
   UnitType,
   WallEdge,
 } from '../types/floorplan';
-import { ALL_DOOR_SWINGS } from './floorplanGeometry';
+import { ALL_DOOR_SWINGS, sanitizeHexColor } from './floorplanGeometry';
+
+const ALLOWED_QUOTE_TARGETS = new Set<QuoteSurfaceTarget>([
+  'ceiling',
+  'wall',
+  'floor',
+  'element',
+  'custom',
+]);
+const ALLOWED_QUOTE_UNITS = new Set<QuoteAreaUnit>(['m2', 'ping', 'm', 'pcs']);
 
 const ALLOWED_KINDS = new Set<ElementKind>([
   'door',
-  'cabinet',
   'window',
+  'cabinet',
+  'wall_cabinet',
+  'kitchen_counter',
   'table',
+  'round_table',
   'chair',
+  'sofa',
   'bed',
+  'bed_curtain',
+  'toilet',
+  'urinal',
+  'shower',
+  'sink',
 ]);
 const ALLOWED_SWING_SET = new Set<DoorSwing>(ALL_DOOR_SWINGS);
 
@@ -159,6 +181,10 @@ export function sanitizeSharedProject(raw: unknown): FloorplanProject | null {
             ...(typeof el.showWallDistances === 'boolean'
               ? { showWallDistances: el.showWallDistances }
               : {}),
+            ...(sanitizeHexColor(el.color) ? { color: sanitizeHexColor(el.color) } : {}),
+            ...(typeof el.layerId === 'string' && el.layerId.trim()
+              ? { layerId: clampString(el.layerId, '', 64) }
+              : {}),
           };
         })
     : [];
@@ -184,6 +210,46 @@ export function sanitizeSharedProject(raw: unknown): FloorplanProject | null {
 
   const unit: UnitType = rec.unit === 'm' || rec.unit === 'mm' ? rec.unit : 'cm';
 
+  const layers: FloorplanLayer[] = Array.isArray(rec.layers)
+    ? rec.layers
+        .slice(0, 30)
+        .filter((l): l is Record<string, unknown> => Boolean(l) && typeof l === 'object')
+        .map((l, idx) => {
+          const cleanColor = sanitizeHexColor(l.color);
+          return {
+            id: clampString(l.id, `layer-${idx + 1}`, 64),
+            name: clampString(l.name, `圖層 ${idx + 1}`, 60),
+            visible: l.visible !== false,
+            ...(cleanColor ? { color: cleanColor } : {}),
+          };
+        })
+    : [];
+
+  const quoteItems: QuoteLineItem[] = Array.isArray(rec.quoteItems)
+    ? rec.quoteItems
+        .slice(0, 200)
+        .filter((q): q is Record<string, unknown> => Boolean(q) && typeof q === 'object')
+        .map((q, idx) => {
+          const tRaw = String(q.target || 'custom') as QuoteSurfaceTarget;
+          const uRaw = String(q.unit || 'pcs') as QuoteAreaUnit;
+          return {
+            id: clampString(q.id, `q-${idx + 1}`, 64),
+            target: ALLOWED_QUOTE_TARGETS.has(tRaw) ? tRaw : 'custom',
+            ...(typeof q.linkedElementId === 'string' && q.linkedElementId.trim()
+              ? { linkedElementId: clampString(q.linkedElementId, '', 64) }
+              : {}),
+            itemName: typeof q.itemName === 'string' ? q.itemName.trim().slice(0, 120) : '',
+            ...(typeof q.specNote === 'string' && q.specNote.trim()
+              ? { specNote: q.specNote.trim().slice(0, 200) }
+              : {}),
+            unit: ALLOWED_QUOTE_UNITS.has(uRaw) ? uRaw : 'pcs',
+            quantity: Math.max(0, finiteOr(q.quantity, 1)),
+            manualQuantity: Boolean(q.manualQuantity),
+            unitPrice: Math.max(0, finiteOr(q.unitPrice, 0)),
+          };
+        })
+    : [];
+
   return {
     projectName: clampString(rec.projectName, '分享空間平面圖', 100),
     ceilingHeightCm: Math.min(1000, Math.max(100, finiteOr(rec.ceilingHeightCm, 250))),
@@ -196,6 +262,10 @@ export function sanitizeSharedProject(raw: unknown): FloorplanProject | null {
     ...(interiorWalls.length > 0 ? { interiorWalls } : {}),
     elements,
     ...(sectionLines.length > 0 ? { sectionLines } : {}),
+    ...(sanitizeHexColor(rec.wallColor) ? { wallColor: sanitizeHexColor(rec.wallColor) } : {}),
+    ...(sanitizeHexColor(rec.floorColor) ? { floorColor: sanitizeHexColor(rec.floorColor) } : {}),
+    ...(layers.length > 0 ? { layers } : {}),
+    ...(quoteItems.length > 0 ? { quoteItems } : {}),
     ...(typeof rec.analysisNotes === 'string' && rec.analysisNotes.trim()
       ? { analysisNotes: rec.analysisNotes.trim().slice(0, 1000) }
       : {}),

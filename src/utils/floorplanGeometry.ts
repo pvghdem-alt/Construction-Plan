@@ -1,17 +1,21 @@
 import type {
   ClosureSuggestion,
   DoorSwing,
+  ElementCategoryId,
   ElementKind,
   ElementPlacementMode,
   ElementWallClearanceRay,
   ElementWallClearancesResult,
   ElevationFurnitureItem,
   ElevationOpeningItem,
+  ElevationRenderItem,
   ElevationWallItem,
   FloorplanElement,
+  FloorplanLayer,
   FloorplanProject,
   Point2D,
   SectionLine,
+  SnapGuideLine,
   SolvedEdge,
   SolvedElementPlacement,
   SolvedElevation,
@@ -28,10 +32,84 @@ const DEG_TO_RAD = Math.PI / 180;
 const RAD_TO_DEG = 180 / Math.PI;
 const CLOSURE_THRESHOLD_CM = 2.0;
 
+export const DEFAULT_WALL_COLOR = '#f8fafc';
+export const DEFAULT_WALL_CORE_2D_COLOR = '#cbd5e1';
+export const DEFAULT_INTERIOR_WALL_CORE_2D_COLOR = '#e2e8f0';
+export const DEFAULT_FLOOR_COLOR = '#e7dccb';
+export const DEFAULT_FLOOR_2D_COLOR = '#f8fafc';
+
+export const WALL_COLOR_PRESETS: ReadonlyArray<{ label: string; hex: string }> = [
+  { label: '純白石膏', hex: '#f8fafc' },
+  { label: '暖米白', hex: '#f5f0e6' },
+  { label: '淺水泥灰', hex: '#cbd5e1' },
+  { label: '鼠尾草綠', hex: '#d1fae5' },
+  { label: '莫蘭迪藍', hex: '#dbeafe' },
+  { label: '霧面炭灰', hex: '#64748b' },
+];
+
+export const FLOOR_COLOR_PRESETS: ReadonlyArray<{ label: string; hex: string }> = [
+  { label: '淺橡木', hex: '#e7dccb' },
+  { label: '胡桃木', hex: '#b0845c' },
+  { label: '白瓷磚', hex: '#f8fafc' },
+  { label: '磨石子灰', hex: '#cbd5e1' },
+  { label: '深岩板', hex: '#64748b' },
+  { label: '醫療淺綠', hex: '#d1fae5' },
+];
+
+export const ELEMENT_COLOR_PRESETS: ReadonlyArray<{ label: string; hex: string }> = [
+  { label: '原木橡色', hex: '#d9b382' },
+  { label: '純白烤漆', hex: '#ffffff' },
+  { label: '暖米亞麻', hex: '#f5ead6' },
+  { label: '莫蘭迪藍', hex: '#93c5fd' },
+  { label: '醫療薄荷', hex: '#6ee7b7' },
+  { label: '現代深灰', hex: '#475569' },
+];
+
+export function sanitizeHexColor(val: unknown): string | undefined {
+  if (typeof val !== 'string') return undefined;
+  const trimmed = val.trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(trimmed)) {
+    return trimmed.toLowerCase();
+  }
+  return undefined;
+}
+
+export function getContrastTextColor(hex: string): string {
+  const clean = sanitizeHexColor(hex);
+  if (!clean) return '#0f172a';
+  const r = parseInt(clean.slice(1, 3), 16);
+  const g = parseInt(clean.slice(3, 5), 16);
+  const b = parseInt(clean.slice(5, 7), 16);
+  const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+  return luminance < 142 ? '#f8fafc' : '#0f172a';
+}
+
+export function darkenHexColor(hex: string, factor = 0.62): string {
+  const clean = sanitizeHexColor(hex);
+  if (!clean) return '#334155';
+  const r = Math.max(0, Math.min(255, Math.round(parseInt(clean.slice(1, 3), 16) * factor)));
+  const g = Math.max(0, Math.min(255, Math.round(parseInt(clean.slice(3, 5), 16) * factor)));
+  const b = Math.max(0, Math.min(255, Math.round(parseInt(clean.slice(5, 7), 16) * factor)));
+  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+}
+
+export const ELEMENT_CATEGORIES: ReadonlyArray<{
+  id: ElementCategoryId;
+  label: string;
+  kinds: readonly ElementKind[];
+}> = [
+  { id: 'opening', label: '門窗', kinds: ['door', 'window'] },
+  { id: 'furniture', label: '家具', kinds: ['table', 'round_table', 'chair', 'sofa'] },
+  { id: 'storage', label: '廚具櫃體', kinds: ['cabinet', 'wall_cabinet', 'kitchen_counter'] },
+  { id: 'bathroom', label: '衛浴設備', kinds: ['toilet', 'urinal', 'shower', 'sink'] },
+  { id: 'medical', label: '病房設施', kinds: ['bed', 'bed_curtain'] },
+];
+
 export const ELEMENT_KIND_DEFAULTS: Record<
   ElementKind,
   {
     label: string;
+    category: ElementCategoryId;
     defaultPlacement: ElementPlacementMode;
     widthCm: number;
     depthCm: number;
@@ -42,52 +120,139 @@ export const ELEMENT_KIND_DEFAULTS: Record<
 > = {
   door: {
     label: '新門扇',
+    category: 'opening',
     defaultPlacement: 'wall',
     widthCm: 90,
     depthCm: 12,
     heightCm: 210,
     elevationCm: 0,
   },
-  cabinet: {
-    label: '新櫃體',
-    defaultPlacement: 'wall',
-    widthCm: 100,
-    depthCm: 60,
-    heightCm: 210,
-    elevationCm: 0,
-  },
   window: {
     label: '新窗戶',
+    category: 'opening',
     defaultPlacement: 'wall',
     widthCm: 140,
     depthCm: 12,
     heightCm: 130,
     elevationCm: 90,
   },
+  cabinet: {
+    label: '新櫃體',
+    category: 'storage',
+    defaultPlacement: 'wall',
+    widthCm: 100,
+    depthCm: 60,
+    heightCm: 210,
+    elevationCm: 0,
+  },
+  wall_cabinet: {
+    label: '吊櫃',
+    category: 'storage',
+    defaultPlacement: 'free',
+    widthCm: 100,
+    depthCm: 35,
+    heightCm: 70,
+    elevationCm: 145,
+  },
+  kitchen_counter: {
+    label: '廚房一字櫥櫃',
+    category: 'storage',
+    defaultPlacement: 'free',
+    widthCm: 240,
+    depthCm: 65,
+    heightCm: 85,
+    elevationCm: 0,
+  },
   table: {
     label: '書桌／餐桌',
+    category: 'furniture',
     defaultPlacement: 'free',
     widthCm: 120,
     depthCm: 60,
     heightCm: 75,
     elevationCm: 0,
   },
+  round_table: {
+    label: '圓桌',
+    category: 'furniture',
+    defaultPlacement: 'free',
+    widthCm: 110,
+    depthCm: 110,
+    heightCm: 75,
+    elevationCm: 0,
+  },
   chair: {
     label: '座椅',
+    category: 'furniture',
     defaultPlacement: 'free',
     widthCm: 48,
     depthCm: 48,
     heightCm: 85,
     elevationCm: 0,
   },
+  sofa: {
+    label: '沙發',
+    category: 'furniture',
+    defaultPlacement: 'free',
+    widthCm: 210,
+    depthCm: 88,
+    heightCm: 82,
+    elevationCm: 0,
+  },
   bed: {
     label: '病床',
+    category: 'medical',
     defaultPlacement: 'free',
     widthCm: 100,
     depthCm: 215,
     heightCm: 60,
     elevationCm: 0,
     showClearance: true,
+  },
+  bed_curtain: {
+    label: '病床隔簾(L型)',
+    category: 'medical',
+    defaultPlacement: 'free',
+    widthCm: 160,
+    depthCm: 240,
+    heightCm: 210,
+    elevationCm: 40,
+  },
+  toilet: {
+    label: '馬桶',
+    category: 'bathroom',
+    defaultPlacement: 'free',
+    widthCm: 40,
+    depthCm: 70,
+    heightCm: 75,
+    elevationCm: 0,
+  },
+  urinal: {
+    label: '小便斗',
+    category: 'bathroom',
+    defaultPlacement: 'free',
+    widthCm: 36,
+    depthCm: 36,
+    heightCm: 75,
+    elevationCm: 50,
+  },
+  shower: {
+    label: '蓮蓬頭',
+    category: 'bathroom',
+    defaultPlacement: 'free',
+    widthCm: 30,
+    depthCm: 35,
+    heightCm: 130,
+    elevationCm: 80,
+  },
+  sink: {
+    label: '洗手台',
+    category: 'bathroom',
+    defaultPlacement: 'free',
+    widthCm: 60,
+    depthCm: 48,
+    heightCm: 85,
+    elevationCm: 0,
   },
 };
 
@@ -98,6 +263,311 @@ export function normalizeAngleDeg(deg: number): number {
 
 export function rotateElementAngle(currentDeg: number | undefined, deltaDeg: number): number {
   return Math.round(normalizeAngleDeg((currentDeg ?? 0) + deltaDeg) * 10) / 10;
+}
+
+export function computeWallDragResult(params: {
+  dxCm: number;
+  dyCm: number;
+  origOffsetCm: number;
+  origBoxXCm: number;
+  origBoxYCm: number;
+  edgeLengthCm: number;
+  elementWidthCm: number;
+  tangent: Point2D;
+  inwardNormal: Point2D;
+  facingNormal: Point2D;
+  isOpening: boolean;
+  detachThresholdCm?: number;
+  snapEnabled?: boolean;
+}):
+  | { mode: 'wall'; offsetCm: number }
+  | { mode: 'free'; xCm: number; yCm: number; rotationDeg: number } {
+  const {
+    dxCm,
+    dyCm,
+    origOffsetCm,
+    origBoxXCm,
+    origBoxYCm,
+    edgeLengthCm,
+    elementWidthCm,
+    tangent,
+    inwardNormal,
+    facingNormal,
+    isOpening,
+    detachThresholdCm = 26,
+    snapEnabled = false,
+  } = params;
+
+  const perpDist = Math.abs(dxCm * inwardNormal.x + dyCm * inwardNormal.y);
+  if (!isOpening && perpDist > detachThresholdCm) {
+    const rotationDeg = Math.round(
+      normalizeAngleDeg((Math.atan2(-facingNormal.x, facingNormal.y) * 180) / Math.PI)
+    );
+    return {
+      mode: 'free',
+      xCm: Math.round(origBoxXCm + dxCm),
+      yCm: Math.round(origBoxYCm + dyCm),
+      rotationDeg,
+    };
+  }
+
+  const projAlong = dxCm * tangent.x + dyCm * tangent.y;
+  const maxOff = Math.max(0, edgeLengthCm - elementWidthCm);
+  let rawOff = Math.min(maxOff, Math.max(0, origOffsetCm + projAlong));
+  if (snapEnabled) {
+    const midOff = maxOff * 0.5;
+    if (Math.abs(rawOff - midOff) <= 5) {
+      rawOff = midOff;
+    } else if (rawOff <= 4) {
+      rawOff = 0;
+    } else if (maxOff - rawOff <= 4) {
+      rawOff = maxOff;
+    }
+  }
+  const offsetCm = Math.round(rawOff);
+  return { mode: 'wall', offsetCm };
+}
+
+/**
+ * Computes magnetic alignment and wall-flush snapping for free-placed elements in 2D space.
+ * Returns snapped center coordinates and visual alignment guide lines.
+ */
+export function computeMagneticSnapPosition(params: {
+  elementId: string;
+  candidateXCm: number;
+  candidateYCm: number;
+  widthCm: number;
+  depthCm: number;
+  rotationDeg: number;
+  wallThicknessCm: number;
+  solved: SolvedFloorplan;
+  placements: SolvedElementPlacement[];
+  enabled: boolean;
+  snapThresholdCm?: number;
+}): { xCm: number; yCm: number; guides: SnapGuideLine[] } {
+  const {
+    elementId,
+    candidateXCm,
+    candidateYCm,
+    widthCm,
+    depthCm,
+    rotationDeg,
+    wallThicknessCm,
+    solved,
+    placements,
+    enabled,
+    snapThresholdCm = 12,
+  } = params;
+
+  if (!enabled) {
+    return {
+      xCm: Math.round(candidateXCm),
+      yCm: Math.round(candidateYCm),
+      guides: [],
+    };
+  }
+
+  const rad = normalizeAngleDeg(rotationDeg) * DEG_TO_RAD;
+  const cos = Math.abs(Math.cos(rad));
+  const sin = Math.abs(Math.sin(rad));
+  const halfExtentX = cos * (Math.max(5, widthCm) * 0.5) + sin * (Math.max(2, depthCm) * 0.5);
+  const halfExtentY = sin * (Math.max(5, widthCm) * 0.5) + cos * (Math.max(2, depthCm) * 0.5);
+  const halfWallThick = Math.max(2, (wallThicknessCm || 12) * 0.5);
+
+  interface AxisCandidate {
+    delta: number;
+    absDist: number;
+    targetPos: number;
+    spanStart: number;
+    spanEnd: number;
+    reason: 'wall' | 'element' | 'center';
+    priority: number;
+  }
+
+  const xCandidates: AxisCandidate[] = [];
+  const yCandidates: AxisCandidate[] = [];
+
+  const candMinY = candidateYCm - halfExtentY;
+  const candMaxY = candidateYCm + halfExtentY;
+  const candMinX = candidateXCm - halfExtentX;
+  const candMaxX = candidateXCm + halfExtentX;
+
+  const tryXTarget = (
+    targetX: number,
+    spanStart: number,
+    spanEnd: number,
+    reason: 'wall' | 'element' | 'center',
+    priority: number,
+    edgesOnly = false
+  ) => {
+    const anchors = edgesOnly
+      ? [candidateXCm - halfExtentX, candidateXCm + halfExtentX]
+      : [candidateXCm - halfExtentX, candidateXCm, candidateXCm + halfExtentX];
+    for (const anchor of anchors) {
+      const delta = targetX - anchor;
+      const absDist = Math.abs(delta);
+      if (absDist <= snapThresholdCm) {
+        xCandidates.push({
+          delta,
+          absDist,
+          targetPos: targetX,
+          spanStart,
+          spanEnd,
+          reason,
+          priority,
+        });
+      }
+    }
+  };
+
+  const tryYTarget = (
+    targetY: number,
+    spanStart: number,
+    spanEnd: number,
+    reason: 'wall' | 'element' | 'center',
+    priority: number,
+    edgesOnly = false
+  ) => {
+    const anchors = edgesOnly
+      ? [candidateYCm - halfExtentY, candidateYCm + halfExtentY]
+      : [candidateYCm - halfExtentY, candidateYCm, candidateYCm + halfExtentY];
+    for (const anchor of anchors) {
+      const delta = targetY - anchor;
+      const absDist = Math.abs(delta);
+      if (absDist <= snapThresholdCm) {
+        yCandidates.push({
+          delta,
+          absDist,
+          targetPos: targetY,
+          spanStart,
+          spanEnd,
+          reason,
+          priority,
+        });
+      }
+    }
+  };
+
+  // 1. Walls (outer perimeter inner face & interior partition faces)
+  const allWalls = [...solved.solvedEdges, ...solved.solvedInteriorWalls].filter(
+    (seg) => seg.hasWall && seg.lengthCm > 4
+  );
+
+  for (const seg of allWalls) {
+    if (Math.abs(seg.tangent.x) < 0.08 && Math.abs(seg.start.x - seg.end.x) < 2) {
+      const wallMinY = Math.min(seg.start.y, seg.end.y);
+      const wallMaxY = Math.max(seg.start.y, seg.end.y);
+      if (candMaxY >= wallMinY - 40 && candMinY <= wallMaxY + 40) {
+        const wallX = (seg.start.x + seg.end.x) * 0.5;
+        if (seg.isInterior) {
+          tryXTarget(wallX - halfWallThick, wallMinY, wallMaxY, 'wall', 3, true);
+          tryXTarget(wallX + halfWallThick, wallMinY, wallMaxY, 'wall', 3, true);
+        } else {
+          tryXTarget(wallX, wallMinY, wallMaxY, 'wall', 3, true);
+        }
+      }
+    }
+    if (Math.abs(seg.tangent.y) < 0.08 && Math.abs(seg.start.y - seg.end.y) < 2) {
+      const wallMinX = Math.min(seg.start.x, seg.end.x);
+      const wallMaxX = Math.max(seg.start.x, seg.end.x);
+      if (candMaxX >= wallMinX - 40 && candMinX <= wallMaxX + 40) {
+        const wallY = (seg.start.y + seg.end.y) * 0.5;
+        if (seg.isInterior) {
+          tryYTarget(wallY - halfWallThick, wallMinX, wallMaxX, 'wall', 3, true);
+          tryYTarget(wallY + halfWallThick, wallMinX, wallMaxX, 'wall', 3, true);
+        } else {
+          tryYTarget(wallY, wallMinX, wallMaxX, 'wall', 3, true);
+        }
+      }
+    }
+  }
+
+  // 2. Other placed elements (flush side contact + left/center/right alignment)
+  for (const pl of placements) {
+    if (pl.element.id === elementId) continue;
+    const isOpening = pl.element.kind === 'door' || pl.element.kind === 'window';
+    const peerHalfW = pl.clampedWidthCm * 0.5;
+    const peerHalfD = isOpening ? halfWallThick : pl.element.depthCm * 0.5;
+    const peerExtentX =
+      Math.abs(pl.tangent.x) * peerHalfW + Math.abs(pl.facingNormal.x) * peerHalfD;
+    const peerExtentY =
+      Math.abs(pl.tangent.y) * peerHalfW + Math.abs(pl.facingNormal.y) * peerHalfD;
+    const pMinX = pl.boxCenter.x - peerExtentX;
+    const pMaxX = pl.boxCenter.x + peerExtentX;
+    const pMidX = pl.boxCenter.x;
+    const pMinY = pl.boxCenter.y - peerExtentY;
+    const pMaxY = pl.boxCenter.y + peerExtentY;
+    const pMidY = pl.boxCenter.y;
+
+    tryXTarget(pMinX, pMinY, pMaxY, 'element', 2, false);
+    tryXTarget(pMaxX, pMinY, pMaxY, 'element', 2, false);
+    tryXTarget(pMidX, pMinY, pMaxY, 'element', 2, false);
+
+    tryYTarget(pMinY, pMinX, pMaxX, 'element', 2, false);
+    tryYTarget(pMaxY, pMinX, pMaxX, 'element', 2, false);
+    tryYTarget(pMidY, pMinX, pMaxX, 'element', 2, false);
+  }
+
+  // 3. Room center axes (center-to-center alignment)
+  if (Math.abs(solved.bounds.centerX - candidateXCm) <= snapThresholdCm * 0.75) {
+    xCandidates.push({
+      delta: solved.bounds.centerX - candidateXCm,
+      absDist: Math.abs(solved.bounds.centerX - candidateXCm),
+      targetPos: solved.bounds.centerX,
+      spanStart: solved.bounds.minY,
+      spanEnd: solved.bounds.maxY,
+      reason: 'center',
+      priority: 1,
+    });
+  }
+  if (Math.abs(solved.bounds.centerY - candidateYCm) <= snapThresholdCm * 0.75) {
+    yCandidates.push({
+      delta: solved.bounds.centerY - candidateYCm,
+      absDist: Math.abs(solved.bounds.centerY - candidateYCm),
+      targetPos: solved.bounds.centerY,
+      spanStart: solved.bounds.minX,
+      spanEnd: solved.bounds.maxX,
+      reason: 'center',
+      priority: 1,
+    });
+  }
+
+  const pickBest = (list: AxisCandidate[]): AxisCandidate | null => {
+    if (list.length === 0) return null;
+    list.sort((a, b) => {
+      if (Math.abs(a.absDist - b.absDist) > 1.5) return a.absDist - b.absDist;
+      return b.priority - a.priority;
+    });
+    return list[0];
+  };
+
+  const bestX = pickBest(xCandidates);
+  const bestY = pickBest(yCandidates);
+
+  const snappedX = Math.round(candidateXCm + (bestX ? bestX.delta : 0));
+  const snappedY = Math.round(candidateYCm + (bestY ? bestY.delta : 0));
+
+  const guides: SnapGuideLine[] = [];
+  if (bestX) {
+    guides.push({
+      axis: 'x',
+      positionCm: Math.round(bestX.targetPos * 10) / 10,
+      startCm: Math.min(bestX.spanStart, snappedY - halfExtentY) - 12,
+      endCm: Math.max(bestX.spanEnd, snappedY + halfExtentY) + 12,
+      reason: bestX.reason,
+    });
+  }
+  if (bestY) {
+    guides.push({
+      axis: 'y',
+      positionCm: Math.round(bestY.targetPos * 10) / 10,
+      startCm: Math.min(bestY.spanStart, snappedX - halfExtentX) - 12,
+      endCm: Math.max(bestY.spanEnd, snappedX + halfExtentX) + 12,
+      reason: bestY.reason,
+    });
+  }
+
+  return { xCm: snappedX, yCm: snappedY, guides };
 }
 
 export const ALL_DOOR_SWINGS: readonly DoorSwing[] = [
@@ -659,8 +1129,7 @@ export function resolveElementPlacements(
     };
 
     const normalDir = el.side === 'outside' ? se.outwardNormal : se.inwardNormal;
-    const isProjectedBody =
-      el.kind === 'cabinet' || el.kind === 'table' || el.kind === 'chair' || el.kind === 'bed';
+    const isProjectedBody = el.kind !== 'door' && el.kind !== 'window';
     const localRotDeg = isProjectedBody ? normalizeAngleDeg(el.rotationDeg ?? 0) : 0;
     const localRotRad = localRotDeg * DEG_TO_RAD;
     const cosR = Math.cos(localRotRad);
@@ -1181,9 +1650,97 @@ function clipSegmentToRange(
   ];
 }
 
+const ELEVATION_OCCLUSION_DEPTH_TOL_CM = 2;
+
+function subtractVisibleIntervals(
+  base: [number, number],
+  blockers: Array<[number, number]>
+): Array<[number, number]> {
+  const [baseStart, baseEnd] = base;
+  if (baseEnd - baseStart <= 1e-4) return [];
+  let remaining: Array<[number, number]> = [[baseStart, baseEnd]];
+
+  for (const [bRawStart, bRawEnd] of blockers) {
+    const bStart = Math.max(baseStart, bRawStart);
+    const bEnd = Math.min(baseEnd, bRawEnd);
+    if (bEnd - bStart <= 1e-4) continue;
+
+    const next: Array<[number, number]> = [];
+    for (const [rStart, rEnd] of remaining) {
+      if (bEnd <= rStart + 1e-4 || bStart >= rEnd - 1e-4) {
+        next.push([rStart, rEnd]);
+      } else {
+        if (bStart > rStart + 1e-4) {
+          next.push([rStart, bStart]);
+        }
+        if (bEnd < rEnd - 1e-4) {
+          next.push([bEnd, rEnd]);
+        }
+      }
+    }
+    remaining = next;
+    if (remaining.length === 0) break;
+  }
+
+  return remaining;
+}
+
+function computeWallOccludingInterval(
+  wall: ElevationWallItem,
+  tS0: number,
+  tS1: number,
+  tD0: number,
+  tD1: number
+): [number, number] | null {
+  const wS0 = wall.sStartCm;
+  const wS1 = wall.sEndCm;
+  const a0 = Math.max(wS0, tS0);
+  const a1 = Math.min(wS1, tS1);
+  if (a1 - a0 <= 1e-4) return null;
+
+  const wD0 = wall.dStartCm ?? wall.depthCm;
+  const wD1 = wall.dEndCm ?? wall.depthCm;
+  const evalWallD = (s: number) =>
+    wS1 - wS0 > 1e-4 ? wD0 + ((s - wS0) / (wS1 - wS0)) * (wD1 - wD0) : Math.min(wD0, wD1);
+  const evalTargetD = (s: number) =>
+    tS1 - tS0 > 1e-4 ? tD0 + ((s - tS0) / (tS1 - tS0)) * (tD1 - tD0) : tD0;
+
+  const v0 = evalTargetD(a0) - evalWallD(a0);
+  const v1 = evalTargetD(a1) - evalWallD(a1);
+  const T = ELEVATION_OCCLUSION_DEPTH_TOL_CM;
+
+  if (v0 <= T && v1 <= T) return null;
+  if (v0 >= T && v1 >= T) return [a0, a1];
+
+  const denom = v1 - v0;
+  if (Math.abs(denom) <= 1e-6) {
+    return (v0 + v1) * 0.5 > T ? [a0, a1] : null;
+  }
+  const sCross = a0 + ((T - v0) / denom) * (a1 - a0);
+  return v0 > T ? [a0, sCross] : [sCross, a1];
+}
+
+function pickWidestInterval(
+  intervals: Array<[number, number]>,
+  fallbackStart: number,
+  fallbackEnd: number
+): [number, number] {
+  if (intervals.length === 0) return [fallbackStart, fallbackEnd];
+  let best = intervals[0];
+  let bestLen = best[1] - best[0];
+  for (let i = 1; i < intervals.length; i++) {
+    const len = intervals[i][1] - intervals[i][0];
+    if (len > bestLen) {
+      best = intervals[i];
+      bestLen = len;
+    }
+  }
+  return best;
+}
+
 /**
  * Project walls, doors, windows, and furniture in front of a section cut line
- * into an architectural elevation drawing.
+ * into an architectural elevation drawing, culling items hidden behind nearer walls.
  */
 export function computeSectionElevation(
   project: FloorplanProject,
@@ -1239,17 +1796,28 @@ export function computeSectionElevation(
     const clipped = clipSegmentToRange(a, b, sMinCm - 4, sMaxCm + 4, -2);
     if (!clipped) continue;
 
-    let segSMin = Math.min(clipped[0].s, clipped[1].s);
-    let segSMax = Math.max(clipped[0].s, clipped[1].s);
+    const c0 = clipped[0].s <= clipped[1].s ? clipped[0] : clipped[1];
+    const c1 = clipped[0].s <= clipped[1].s ? clipped[1] : clipped[0];
+
+    let segSMin = c0.s;
+    let segSMax = c1.s;
     const span = segSMax - segSMin;
     if (span < 2 && !isCutThrough) continue;
+
+    let dStartCm = c0.d;
+    let dEndCm = c1.d;
+    let avgDepth = (c0.d + c1.d) * 0.5;
+
     if (isCutThrough && span < wallThick) {
       const midS = (segSMin + segSMax) * 0.5;
       segSMin = midS - wallThick * 0.5;
       segSMax = midS + wallThick * 0.5;
+      // Cut cross-section sits directly on the section cut plane (d = 0)
+      dStartCm = 0;
+      dEndCm = 0;
+      avgDepth = 0;
     }
 
-    const avgDepth = (clipped[0].d + clipped[1].d) * 0.5;
     walls.push({
       wallId: seg.id,
       label: seg.label,
@@ -1258,6 +1826,8 @@ export function computeSectionElevation(
       sStartCm: segSMin,
       sEndCm: segSMax,
       depthCm: avgDepth,
+      dStartCm,
+      dEndCm,
       heightCm: ceilingHeightCm,
     });
   }
@@ -1267,6 +1837,7 @@ export function computeSectionElevation(
 
   const openings: ElevationOpeningItem[] = [];
   const furniture: ElevationFurnitureItem[] = [];
+  const edgeOcclusionTol = wallThick * 0.65;
 
   for (const pl of placements) {
     const el = pl.element;
@@ -1277,10 +1848,38 @@ export function computeSectionElevation(
       // Only show openings that are in front of the cut line and face broadly toward viewer
       if (Math.max(pA.d, pB.d) < -wallThick * 0.5) continue;
 
-      const opMin = Math.max(sMinCm - 2, Math.min(pA.s, pB.s));
-      const opMax = Math.min(sMaxCm + 2, Math.max(pA.s, pB.s));
+      const o0 = pA.s <= pB.s ? pA : pB;
+      const o1 = pA.s <= pB.s ? pB : pA;
+      const opMin = Math.max(sMinCm - 2, o0.s);
+      const opMax = Math.min(sMaxCm + 2, o1.s);
       const projW = opMax - opMin;
       if (projW < 6) continue;
+
+      const evalOpeningD = (s: number) =>
+        o1.s - o0.s > 1e-4 ? o0.d + ((s - o0.s) / (o1.s - o0.s)) * (o1.d - o0.d) : midDepth;
+      const tD0 = evalOpeningD(opMin);
+      const tD1 = evalOpeningD(opMax);
+      const hostWallId = el.placement === 'wall' ? el.edgeId : undefined;
+
+      const blockers: Array<[number, number]> = [];
+      for (const wall of walls) {
+        if (hostWallId && wall.wallId === hostWallId) continue;
+        const occ = computeWallOccludingInterval(wall, opMin, opMax, tD0, tD1);
+        if (occ) blockers.push(occ);
+      }
+
+      const visibleIntervals = subtractVisibleIntervals([opMin, opMax], blockers);
+      const visibleWidth = visibleIntervals.reduce((acc, [s0, s1]) => acc + (s1 - s0), 0);
+      if (visibleWidth < Math.min(4, projW * 0.15)) {
+        continue;
+      }
+
+      const [visibleSStartCm, visibleSEndCm] = pickWidestInterval(visibleIntervals, opMin, opMax);
+      const firstVisibleStart = visibleIntervals[0][0];
+      const lastVisibleEnd = visibleIntervals[visibleIntervals.length - 1][1];
+      const dimSStartCm =
+        firstVisibleStart - opMin > edgeOcclusionTol ? firstVisibleStart : opMin;
+      const dimSEndCm = opMax - lastVisibleEnd > edgeOcclusionTol ? lastVisibleEnd : opMax;
 
       let slideSignInView: 1 | -1 | undefined;
       if (el.kind === 'door') {
@@ -1301,6 +1900,7 @@ export function computeSectionElevation(
 
       openings.push({
         elementId: el.id,
+        hostWallId,
         kind: el.kind,
         name: el.name,
         ...(el.kind === 'door'
@@ -1311,11 +1911,16 @@ export function computeSectionElevation(
           : {}),
         sStartCm: opMin,
         sEndCm: opMax,
+        visibleSStartCm,
+        visibleSEndCm,
+        dimSStartCm,
+        dimSEndCm,
         projectedWidthCm: projW,
         actualWidthCm: pl.clampedWidthCm,
         elevationCm: Math.max(0, el.elevationCm),
         heightCm: Math.min(ceilingHeightCm - Math.max(0, el.elevationCm), Math.max(10, el.heightCm)),
         depthCm: midDepth,
+        ...(el.color ? { color: el.color } : {}),
       });
     } else {
       const halfW = pl.clampedWidthCm * 0.5;
@@ -1347,7 +1952,23 @@ export function computeSectionElevation(
       const rawSMax = Math.max(...projectedCorners.map((c) => c.s));
       const sStart = Math.max(sMinCm - 2, rawSMin);
       const sEnd = Math.min(sMaxCm + 2, rawSMax);
-      if (sEnd - sStart < 4) continue;
+      const fSpan = sEnd - sStart;
+      if (fSpan < 4) continue;
+
+      const frontDepth = Math.max(0, dMin);
+      const blockers: Array<[number, number]> = [];
+      for (const wall of walls) {
+        const occ = computeWallOccludingInterval(wall, sStart, sEnd, frontDepth, frontDepth);
+        if (occ) blockers.push(occ);
+      }
+
+      const visibleIntervals = subtractVisibleIntervals([sStart, sEnd], blockers);
+      const visibleWidth = visibleIntervals.reduce((acc, [s0, s1]) => acc + (s1 - s0), 0);
+      if (visibleWidth < Math.min(4, fSpan * 0.15)) {
+        continue;
+      }
+
+      const [visibleSStartCm, visibleSEndCm] = pickWidestInterval(visibleIntervals, sStart, sEnd);
 
       furniture.push({
         elementId: el.id,
@@ -1355,9 +1976,12 @@ export function computeSectionElevation(
         name: el.name,
         sStartCm: sStart,
         sEndCm: sEnd,
+        visibleSStartCm,
+        visibleSEndCm,
         elevationCm: Math.max(0, el.elevationCm),
         heightCm: Math.min(ceilingHeightCm, Math.max(10, el.heightCm)),
-        depthCm: Math.max(0, dMin),
+        depthCm: frontDepth,
+        ...(el.color ? { color: el.color } : {}),
       });
     }
   }
@@ -1376,5 +2000,142 @@ export function computeSectionElevation(
     furniture,
   };
 }
+
+/**
+ * Combine walls, openings, and furniture into a unified back-to-front painter's render list
+ * so nearer partition walls naturally occlude background walls, windows, and furniture.
+ */
+export function buildElevationRenderItems(elevation: SolvedElevation): ElevationRenderItem[] {
+  const wallDepthMap = new Map<string, number>();
+  elevation.walls.forEach((w) => {
+    wallDepthMap.set(w.wallId, w.depthCm);
+  });
+
+  const items: ElevationRenderItem[] = [];
+  elevation.walls.forEach((wall, wallIndex) => {
+    items.push({
+      kind: 'wall',
+      renderDepthCm: wall.depthCm,
+      priority: 0,
+      wall,
+      wallIndex,
+    });
+  });
+
+  elevation.openings.forEach((opening, openingIndex) => {
+    const hostDepth = opening.hostWallId ? wallDepthMap.get(opening.hostWallId) : undefined;
+    const renderDepthCm =
+      hostDepth !== undefined ? Math.min(opening.depthCm, hostDepth) : opening.depthCm;
+    items.push({
+      kind: 'opening',
+      renderDepthCm,
+      priority: 1,
+      opening,
+      openingIndex,
+    });
+  });
+
+  elevation.furniture.forEach((furniture) => {
+    items.push({
+      kind: 'furniture',
+      renderDepthCm: furniture.depthCm,
+      priority: 2,
+      furniture,
+    });
+  });
+
+  items.sort((a, b) => {
+    const depthDiff = b.renderDepthCm - a.renderDepthCm;
+    if (Math.abs(depthDiff) > 0.25) return depthDiff;
+    return a.priority - b.priority;
+  });
+
+  return items;
+}
+
+export const DEFAULT_FLOORPLAN_LAYERS: ReadonlyArray<FloorplanLayer> = [
+  { id: 'layer-opening', name: '門窗圖層', visible: true },
+  { id: 'layer-furniture', name: '家具圖層', visible: true },
+  { id: 'layer-storage', name: '廚具櫃體圖層', visible: true },
+  { id: 'layer-bathroom', name: '衛浴設備圖層', visible: true },
+  { id: 'layer-medical', name: '病房設施圖層', visible: true },
+];
+
+export function getEffectiveLayers(layers?: ReadonlyArray<FloorplanLayer>): FloorplanLayer[] {
+  if (Array.isArray(layers) && layers.length > 0) {
+    return layers.map((layer, idx) => ({
+      id: layer.id || `layer-${idx + 1}`,
+      name: layer.name || `圖層 ${idx + 1}`,
+      visible: layer.visible !== false,
+      ...(sanitizeHexColor(layer.color) ? { color: sanitizeHexColor(layer.color) } : {}),
+    }));
+  }
+  return DEFAULT_FLOORPLAN_LAYERS.map((l) => ({ ...l }));
+}
+
+export function getDefaultLayerIdForKind(
+  kind: ElementKind,
+  layers: ReadonlyArray<FloorplanLayer>
+): string {
+  const category = ELEMENT_KIND_DEFAULTS[kind]?.category ?? 'furniture';
+  const expectedId = `layer-${category}`;
+  if (layers.some((l) => l.id === expectedId)) {
+    return expectedId;
+  }
+  return layers[0]?.id ?? expectedId;
+}
+
+export function resolveElementLayer(
+  element: Pick<FloorplanElement, 'kind' | 'layerId'>,
+  layers?: ReadonlyArray<FloorplanLayer>
+): FloorplanLayer | undefined {
+  const effective = getEffectiveLayers(layers);
+  if (element.layerId) {
+    const matched = effective.find((l) => l.id === element.layerId);
+    if (matched) return matched;
+  }
+  const fallbackId = getDefaultLayerIdForKind(element.kind, effective);
+  return effective.find((l) => l.id === fallbackId) ?? effective[0];
+}
+
+export function isElementVisibleInLayers(
+  element: Pick<FloorplanElement, 'kind' | 'layerId'>,
+  layers?: ReadonlyArray<FloorplanLayer>
+): boolean {
+  const layer = resolveElementLayer(element, layers);
+  return layer ? layer.visible !== false : true;
+}
+
+export function resolveElementEffectiveColor(
+  element: Pick<FloorplanElement, 'kind' | 'layerId' | 'color'>,
+  layers?: ReadonlyArray<FloorplanLayer>
+): string | undefined {
+  const itemColor = sanitizeHexColor(element.color);
+  if (itemColor) return itemColor;
+  const layer = resolveElementLayer(element, layers);
+  return layer ? sanitizeHexColor(layer.color) : undefined;
+}
+
+export function applyLayersToPlacements(
+  placements: SolvedElementPlacement[],
+  layers?: ReadonlyArray<FloorplanLayer>
+): SolvedElementPlacement[] {
+  const effectiveLayers = getEffectiveLayers(layers);
+  const out: SolvedElementPlacement[] = [];
+  for (const pl of placements) {
+    if (!isElementVisibleInLayers(pl.element, effectiveLayers)) continue;
+    const effectiveColor = resolveElementEffectiveColor(pl.element, effectiveLayers);
+    out.push({
+      ...pl,
+      element:
+        effectiveColor !== pl.element.color
+          ? { ...pl.element, color: effectiveColor }
+          : pl.element,
+    });
+  }
+  return out;
+}
+
+
 
 

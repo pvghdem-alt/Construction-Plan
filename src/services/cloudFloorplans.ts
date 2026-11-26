@@ -17,13 +17,17 @@ import { db, handleFirestoreError, OperationType } from '../firebase';
 import type {
   DoorSwing,
   FloorplanElement,
+  FloorplanLayer,
   FloorplanProject,
   InteriorWall,
+  QuoteAreaUnit,
+  QuoteLineItem,
+  QuoteSurfaceTarget,
   SectionLine,
   SolvedFloorplan,
   WallEdge,
 } from '../types/floorplan';
-import { ALL_DOOR_SWINGS } from '../utils/floorplanGeometry';
+import { ALL_DOOR_SWINGS, sanitizeHexColor } from '../utils/floorplanGeometry';
 import {
   buildShareDocId,
   mergeShareEmailLists,
@@ -127,6 +131,56 @@ function sanitizeElement(el: FloorplanElement, idx: number): Record<string, unkn
   if (typeof el.showWallDistances === 'boolean') {
     out.showWallDistances = el.showWallDistances;
   }
+  const cleanColor = sanitizeHexColor(el.color);
+  if (cleanColor) {
+    out.color = cleanColor;
+  }
+  if (typeof el.layerId === 'string' && el.layerId.trim()) {
+    out.layerId = el.layerId.trim().slice(0, 64);
+  }
+  return out;
+}
+
+function sanitizeLayer(layer: FloorplanLayer, idx: number): Record<string, unknown> {
+  const out: Record<string, unknown> = {
+    id: clampString(layer.id, `layer-${idx + 1}`, 64),
+    name: clampString(layer.name, `圖層 ${idx + 1}`, 60),
+    visible: layer.visible !== false,
+  };
+  const cleanColor = sanitizeHexColor(layer.color);
+  if (cleanColor) {
+    out.color = cleanColor;
+  }
+  return out;
+}
+
+const VALID_QUOTE_TARGETS = new Set<QuoteSurfaceTarget>([
+  'ceiling',
+  'wall',
+  'floor',
+  'element',
+  'custom',
+]);
+const VALID_QUOTE_UNITS = new Set<QuoteAreaUnit>(['m2', 'ping', 'm', 'pcs']);
+
+function sanitizeQuoteItem(item: QuoteLineItem, idx: number): Record<string, unknown> {
+  const target: QuoteSurfaceTarget = VALID_QUOTE_TARGETS.has(item.target) ? item.target : 'custom';
+  const unit: QuoteAreaUnit = VALID_QUOTE_UNITS.has(item.unit) ? item.unit : 'pcs';
+  const out: Record<string, unknown> = {
+    id: clampString(item.id, `q-${idx + 1}`, 64),
+    target,
+    itemName: typeof item.itemName === 'string' ? item.itemName.trim().slice(0, 120) : '',
+    unit,
+    quantity: Math.max(0, finiteOr(item.quantity, 0)),
+    manualQuantity: Boolean(item.manualQuantity),
+    unitPrice: Math.max(0, finiteOr(item.unitPrice, 0)),
+  };
+  if (typeof item.linkedElementId === 'string' && item.linkedElementId.trim()) {
+    out.linkedElementId = item.linkedElementId.trim().slice(0, 64);
+  }
+  if (typeof item.specNote === 'string' && item.specNote.trim()) {
+    out.specNote = item.specNote.trim().slice(0, 200);
+  }
   return out;
 }
 
@@ -153,6 +207,10 @@ function buildFloorplanBodyPayload(
   const safeInteriorWalls = (project.interiorWalls ?? []).slice(0, 40).map(sanitizeInteriorWall);
   const safeElements = project.elements.slice(0, 120).map(sanitizeElement);
   const safeSectionLines = (project.sectionLines ?? []).slice(0, 20).map(sanitizeSectionLine);
+  const safeLayers = (project.layers ?? []).slice(0, 30).map(sanitizeLayer);
+  const safeQuoteItems = (project.quoteItems ?? []).slice(0, 200).map(sanitizeQuoteItem);
+  const safeWallColor = sanitizeHexColor(project.wallColor);
+  const safeFloorColor = sanitizeHexColor(project.floorColor);
 
   const payload: Record<string, unknown> = {
     projectName: clampString(project.projectName, '未命名空間平面圖', 100),
@@ -166,6 +224,8 @@ function buildFloorplanBodyPayload(
     interiorWalls: safeInteriorWalls,
     elements: safeElements,
     sectionLines: safeSectionLines,
+    layers: safeLayers,
+    quoteItems: safeQuoteItems,
     summary: {
       areaSqMeters: Math.max(0, Math.round(summaryInput.areaSqMeters * 100) / 100),
       areaPing: Math.max(0, Math.round(summaryInput.areaPing * 100) / 100),
@@ -175,6 +235,12 @@ function buildFloorplanBodyPayload(
     updatedAt: serverTimestamp(),
   };
 
+  if (safeWallColor) {
+    payload.wallColor = safeWallColor;
+  }
+  if (safeFloorColor) {
+    payload.floorColor = safeFloorColor;
+  }
   if (typeof project.analysisNotes === 'string' && project.analysisNotes.trim()) {
     payload.analysisNotes = project.analysisNotes.trim().slice(0, 1000);
   }
@@ -223,6 +289,14 @@ function parseFloorplanDocData(
     elements: Array.isArray(d.elements) ? (d.elements as FloorplanElement[]) : [],
     ...(Array.isArray(d.sectionLines) && d.sectionLines.length > 0
       ? { sectionLines: d.sectionLines as SectionLine[] }
+      : {}),
+    ...(sanitizeHexColor(d.wallColor) ? { wallColor: sanitizeHexColor(d.wallColor) } : {}),
+    ...(sanitizeHexColor(d.floorColor) ? { floorColor: sanitizeHexColor(d.floorColor) } : {}),
+    ...(Array.isArray(d.layers) && d.layers.length > 0
+      ? { layers: d.layers as FloorplanLayer[] }
+      : {}),
+    ...(Array.isArray(d.quoteItems) && d.quoteItems.length > 0
+      ? { quoteItems: d.quoteItems as QuoteLineItem[] }
       : {}),
     ...(typeof d.analysisNotes === 'string' ? { analysisNotes: d.analysisNotes } : {}),
   };

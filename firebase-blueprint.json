@@ -89,6 +89,24 @@
           "type": "array",
           "description": "Optional architectural section lines for elevation views (max 20)"
         },
+        "wallColor": {
+          "type": "string",
+          "description": "Optional hex wall surface color",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "floorColor": {
+          "type": "string",
+          "description": "Optional hex floor surface color",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "layers": {
+          "type": "array",
+          "description": "Optional element layer definitions for visibility and uniform color (max 30)"
+        },
+        "quoteItems": {
+          "type": "array",
+          "description": "Optional construction quotation sheet line items (max 200)"
+        },
         "summary": {
           "type": "object",
           "description": "Precomputed display metrics (areaSqMeters, areaPing, edgeCount, elementCount)"
@@ -214,6 +232,24 @@
         "sectionLines": {
           "type": "array",
           "description": "Optional architectural section lines for elevation views (max 20)"
+        },
+        "wallColor": {
+          "type": "string",
+          "description": "Optional hex wall surface color",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "floorColor": {
+          "type": "string",
+          "description": "Optional hex floor surface color",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "layers": {
+          "type": "array",
+          "description": "Optional element layer definitions for visibility and uniform color (max 30)"
+        },
+        "quoteItems": {
+          "type": "array",
+          "description": "Optional construction quotation sheet line items (max 200)"
         },
         "summary": {
           "type": "object",

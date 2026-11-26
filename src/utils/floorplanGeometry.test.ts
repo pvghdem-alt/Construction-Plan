@@ -3,21 +3,42 @@ import assert from 'node:assert/strict';
 import {
   ALL_DOOR_SWINGS,
   applyAutoCloseToProject,
+  applyLayersToPlacements,
   buildDoorSwing,
+  buildElevationRenderItems,
   computeElementWallClearances,
+  computeMagneticSnapPosition,
   computeSectionElevation,
+  computeWallDragResult,
   computeWallSurfaceAreas,
   createPresetSectionLine,
+  DEFAULT_FLOORPLAN_LAYERS,
   duplicateElementForPaste,
+  ELEMENT_CATEGORIES,
+  ELEMENT_KIND_DEFAULTS,
   flipDoorSwing,
   formatDimension,
+  getDefaultLayerIdForKind,
   getDoorSwingLabel,
+  getEffectiveLayers,
   parseDoorSwing,
+  resolveElementEffectiveColor,
   resolveElementPlacements,
   rotateElementAngle,
+  sanitizeHexColor,
   snapAngleDeg,
   solveFloorplan,
 } from './floorplanGeometry';
+import {
+  buildQuotationCsv,
+  buildQuotationPlainText,
+  buildQuoteItemFromElement,
+  computeQuotationTotals,
+  computeQuoteSpaceMetrics,
+  createBlankQuoteLineItem,
+  resolveQuoteItemQuantity,
+} from './quotationCalculator';
+import { buildElevationSvgString, buildFloorplan2DSvgString } from './drawingSvgExport';
 import {
   buildGitHubPagesShareUrl,
   decodeShareToken,
@@ -472,6 +493,731 @@ test('collaborative sharing helpers default legacy shares to editor and resolve 
   assert.equal(resolvedOwn.useSharedVersion, false);
   assert.equal(resolvedOwn.project.projectName, 'Old Owner Copy');
 });
+
+test('computeSectionElevation culls windows and furniture hidden behind nearer partition walls and orders back-to-front', () => {
+  const projectWithSubroomCabinet = {
+    ...ROOM_IN_ROOM_PRESET,
+    elements: [
+      ...ROOM_IN_ROOM_PRESET.elements,
+      {
+        id: 'cab-hidden',
+        kind: 'cabinet' as const,
+        name: '小房內衣櫃',
+        placement: 'free' as const,
+        edgeId: 'rw1',
+        offsetCm: 0,
+        xCm: 300,
+        yCm: 50,
+        widthCm: 80,
+        depthCm: 45,
+        heightCm: 200,
+        elevationCm: 0,
+        side: 'inside' as const,
+      },
+      {
+        id: 'win-partial',
+        kind: 'window' as const,
+        name: '半遮擋窗',
+        placement: 'wall' as const,
+        edgeId: 'rw1',
+        offsetCm: 170,
+        widthCm: 90,
+        depthCm: 12,
+        heightCm: 100,
+        elevationCm: 120,
+        side: 'inside' as const,
+      },
+    ],
+  };
+
+  const solved = solveFloorplan(projectWithSubroomCabinet);
+  const placements = resolveElementPlacements(projectWithSubroomCabinet.elements, solved);
+
+  // Horizontal cut across center (y=242) looking North: iw2 (y=160, x=214..372.5) is in front of rw1 (y=0)
+  const secNorth = createPresetSectionLine(solved, 'north', []);
+  const elevNorth = computeSectionElevation(projectWithSubroomCabinet, solved, placements, secNorth);
+  const openingNames = elevNorth.openings.map((o) => o.name);
+
+  // Fully occluded subroom window and subroom cabinet must NOT appear
+  assert.ok(!openingNames.includes('小房高窗'));
+  assert.equal(
+    elevNorth.furniture.some((f) => f.name === '小房內衣櫃'),
+    false
+  );
+
+  // Unoccluded main window and subroom front door MUST appear
+  assert.ok(openingNames.includes('主室大窗'));
+  assert.ok(openingNames.includes('小房門'));
+
+  // Partially occluded window (x=170..260 with iw2 blocking x>=214) stays visible in [170..214]
+  const partialWin = elevNorth.openings.find((o) => o.name === '半遮擋窗');
+  assert.ok(partialWin);
+  assert.ok((partialWin.visibleSEndCm ?? partialWin.sEndCm) <= (partialWin.sEndCm - 30));
+  assert.ok((partialWin.dimSEndCm ?? partialWin.sEndCm) <= (partialWin.sEndCm - 30));
+
+  // Render order must draw rw1 & 主室大窗 before iw2 & 小房門, and cut walls last
+  const renderItems = buildElevationRenderItems(elevNorth);
+  const idxBackWin = renderItems.findIndex(
+    (it) => it.kind === 'opening' && it.opening.name === '主室大窗'
+  );
+  const idxFrontPartition = renderItems.findIndex(
+    (it) => it.kind === 'wall' && it.wall.wallId === 'iw2'
+  );
+  const idxSubDoor = renderItems.findIndex(
+    (it) => it.kind === 'opening' && it.opening.name === '小房門'
+  );
+  const idxCutWall = renderItems.findIndex(
+    (it) => it.kind === 'wall' && it.wall.isCutThrough
+  );
+  assert.ok(idxBackWin >= 0 && idxFrontPartition > idxBackWin);
+  assert.ok(idxSubDoor > idxFrontPartition);
+  assert.ok(idxCutWall > idxSubDoor);
+
+  // Exported SVG must NOT include hidden 小房高窗 or 小房內衣櫃
+  const svg = buildElevationSvgString(projectWithSubroomCabinet, solved, placements, secNorth, elevNorth);
+  assert.equal(svg.includes('小房高窗'), false);
+  assert.equal(svg.includes('小房內衣櫃'), false);
+  assert.ok(svg.includes('主室大窗'));
+  assert.ok(svg.includes('小房門'));
+
+  // A section line placed INSIDE the small room (y=80 looking North) CAN see 小房高窗 and 小房內衣櫃
+  const secInsideSubroom = {
+    id: 'sec-sub',
+    label: 'B-B',
+    startXCm: 200,
+    startYCm: 80,
+    endXCm: 380,
+    endYCm: 80,
+    viewDirection: 1 as const,
+  };
+  const elevSubroom = computeSectionElevation(
+    projectWithSubroomCabinet,
+    solved,
+    placements,
+    secInsideSubroom
+  );
+  assert.ok(elevSubroom.openings.some((o) => o.name === '小房高窗'));
+  assert.ok(elevSubroom.furniture.some((f) => f.name === '小房內衣櫃'));
+  assert.equal(
+    elevSubroom.openings.some((o) => o.name === '小房門'),
+    false
+  );
+});
+
+test('supports wall_cabinet, bed_curtain, toilet, urinal, shower, and sink across placement, elevation, SVG export, and share sanitization', () => {
+  const newKinds = ['wall_cabinet', 'bed_curtain', 'toilet', 'urinal', 'shower', 'sink'] as const;
+  for (const kind of newKinds) {
+    assert.ok(ELEMENT_KIND_DEFAULTS[kind], `Missing defaults for ${kind}`);
+  }
+  assert.equal(ELEMENT_KIND_DEFAULTS.wall_cabinet.defaultPlacement, 'free');
+  assert.equal(ELEMENT_KIND_DEFAULTS.wall_cabinet.elevationCm, 145);
+  assert.equal(ELEMENT_KIND_DEFAULTS.bed_curtain.defaultPlacement, 'free');
+  assert.equal(ELEMENT_KIND_DEFAULTS.bed_curtain.elevationCm, 40);
+  assert.equal(ELEMENT_KIND_DEFAULTS.toilet.defaultPlacement, 'free');
+  assert.equal(ELEMENT_KIND_DEFAULTS.urinal.defaultPlacement, 'free');
+  assert.equal(ELEMENT_KIND_DEFAULTS.shower.defaultPlacement, 'free');
+  assert.equal(ELEMENT_KIND_DEFAULTS.sink.defaultPlacement, 'free');
+
+  const testProject = {
+    ...CARE_ROOM_PRESET,
+    elements: [
+      {
+        id: 'el-wc',
+        kind: 'wall_cabinet' as const,
+        name: '吊櫃',
+        placement: 'wall' as const,
+        edgeId: 'e1',
+        offsetCm: 30,
+        widthCm: 100,
+        depthCm: 35,
+        heightCm: 70,
+        elevationCm: 145,
+        side: 'inside' as const,
+      },
+      {
+        id: 'el-toilet',
+        kind: 'toilet' as const,
+        name: '馬桶',
+        placement: 'wall' as const,
+        edgeId: 'e1',
+        offsetCm: 150,
+        widthCm: 40,
+        depthCm: 70,
+        heightCm: 75,
+        elevationCm: 0,
+        side: 'inside' as const,
+      },
+      {
+        id: 'el-urinal',
+        kind: 'urinal' as const,
+        name: '小便斗',
+        placement: 'wall' as const,
+        edgeId: 'e1',
+        offsetCm: 210,
+        widthCm: 36,
+        depthCm: 36,
+        heightCm: 75,
+        elevationCm: 50,
+        side: 'inside' as const,
+      },
+      {
+        id: 'el-shower',
+        kind: 'shower' as const,
+        name: '蓮蓬頭',
+        placement: 'wall' as const,
+        edgeId: 'e1',
+        offsetCm: 270,
+        widthCm: 30,
+        depthCm: 35,
+        heightCm: 130,
+        elevationCm: 80,
+        side: 'inside' as const,
+      },
+      {
+        id: 'el-sink',
+        kind: 'sink' as const,
+        name: '洗手台',
+        placement: 'wall' as const,
+        edgeId: 'e1',
+        offsetCm: 320,
+        widthCm: 60,
+        depthCm: 48,
+        heightCm: 85,
+        elevationCm: 0,
+        side: 'inside' as const,
+      },
+      {
+        id: 'el-curtain',
+        kind: 'bed_curtain' as const,
+        name: '病床隔簾(L型)',
+        placement: 'free' as const,
+        edgeId: 'e1',
+        offsetCm: 0,
+        xCm: 200,
+        yCm: 250,
+        rotationDeg: 90,
+        widthCm: 160,
+        depthCm: 240,
+        heightCm: 210,
+        elevationCm: 40,
+        side: 'inside' as const,
+      },
+    ],
+  };
+
+  const solved = solveFloorplan(testProject);
+  const placements = resolveElementPlacements(testProject.elements, solved);
+  assert.equal(placements.length, 6);
+
+  const toiletPl = placements.find((p) => p.element.kind === 'toilet')!;
+  assert.equal(toiletPl.placementMode, 'wall');
+  assert.ok(Math.abs(toiletPl.boxCenter.y - 35) < 0.1);
+
+  const curtainPl = placements.find((p) => p.element.kind === 'bed_curtain')!;
+  assert.equal(curtainPl.placementMode, 'free');
+  assert.equal(curtainPl.boxCenter.x, 200);
+  assert.equal(curtainPl.boxCenter.y, 250);
+  assert.ok(Math.abs(curtainPl.facingNormal.x - -1) < 1e-6);
+
+  // Elevation looking North (-Y) from y=320 sees all 6 fixtures
+  const secNorth = createPresetSectionLine(solved, 'north', []);
+  const elevNorth = computeSectionElevation(testProject, solved, placements, secNorth);
+  for (const kind of newKinds) {
+    assert.ok(
+      elevNorth.furniture.some((f) => f.kind === kind),
+      `Missing ${kind} in section elevation`
+    );
+  }
+  const wcElev = elevNorth.furniture.find((f) => f.kind === 'wall_cabinet')!;
+  assert.equal(wcElev.elevationCm, 145);
+  assert.equal(wcElev.heightCm, 70);
+
+  // 2D & Elevation SVG exports render all 6 element names cleanly
+  const svg2d = buildFloorplan2DSvgString(testProject, solved, placements);
+  const svgElev = buildElevationSvgString(testProject, solved, placements, secNorth, elevNorth);
+  for (const el of testProject.elements) {
+    assert.ok(svg2d.includes(el.name), `Missing ${el.name} in 2D SVG`);
+    assert.ok(svgElev.includes(el.name), `Missing ${el.name} in Elevation SVG`);
+  }
+
+  // Share link sanitization preserves all 6 new kinds
+  const sanitized = sanitizeSharedProject(testProject);
+  assert.ok(sanitized);
+  assert.equal(sanitized.elements.length, 6);
+  for (const kind of newKinds) {
+    assert.ok(sanitized.elements.some((e) => e.kind === kind));
+  }
+});
+
+test('computeWallDragResult slides wall-anchored openings/fixtures and detaches fixtures pulled away from wall', () => {
+  // Top horizontal wall: tangent=(1,0), inwardNormal=(0,1), facingNormal=(0,1)
+  const slideRes = computeWallDragResult({
+    dxCm: 55,
+    dyCm: 8,
+    origOffsetCm: 20,
+    origBoxXCm: 40,
+    origBoxYCm: 35,
+    edgeLengthCm: 420,
+    elementWidthCm: 40,
+    tangent: { x: 1, y: 0 },
+    inwardNormal: { x: 0, y: 1 },
+    facingNormal: { x: 0, y: 1 },
+    isOpening: false,
+  });
+  assert.deepEqual(slideRes, { mode: 'wall', offsetCm: 75 });
+
+  // Pulling a fixture 60 cm away from the wall detaches smoothly to free placement keeping orientation
+  const detachRes = computeWallDragResult({
+    dxCm: 55,
+    dyCm: 60,
+    origOffsetCm: 20,
+    origBoxXCm: 40,
+    origBoxYCm: 35,
+    edgeLengthCm: 420,
+    elementWidthCm: 40,
+    tangent: { x: 1, y: 0 },
+    inwardNormal: { x: 0, y: 1 },
+    facingNormal: { x: 0, y: 1 },
+    isOpening: false,
+  });
+  assert.deepEqual(detachRes, { mode: 'free', xCm: 95, yCm: 95, rotationDeg: 0 });
+
+  // Doors/windows never detach from their host wall even on large perpendicular mouse motion
+  const doorRes = computeWallDragResult({
+    dxCm: 40,
+    dyCm: 120,
+    origOffsetCm: 30,
+    origBoxXCm: 85,
+    origBoxYCm: 0,
+    edgeLengthCm: 420,
+    elementWidthCm: 110,
+    tangent: { x: 1, y: 0 },
+    inwardNormal: { x: 0, y: 1 },
+    facingNormal: { x: 0, y: 1 },
+    isOpening: true,
+  });
+  assert.deepEqual(doorRes, { mode: 'wall', offsetCm: 70 });
+
+  // Disabling snap skips endpoint/midpoint snapping along wall
+  const unsnappedSlide = computeWallDragResult({
+    dxCm: 2,
+    dyCm: 0,
+    origOffsetCm: 0,
+    origBoxXCm: 20,
+    origBoxYCm: 35,
+    edgeLengthCm: 420,
+    elementWidthCm: 40,
+    tangent: { x: 1, y: 0 },
+    inwardNormal: { x: 0, y: 1 },
+    facingNormal: { x: 0, y: 1 },
+    isOpening: false,
+    snapEnabled: false,
+  });
+  assert.deepEqual(unsnappedSlide, { mode: 'wall', offsetCm: 2 });
+});
+
+test('ELEMENT_CATEGORIES covers all 15 element kinds without duplicates', () => {
+  const allDefaultKinds = Object.keys(ELEMENT_KIND_DEFAULTS);
+  assert.equal(allDefaultKinds.length, 15);
+  const seen: string[] = [];
+  for (const cat of ELEMENT_CATEGORIES) {
+    assert.ok(cat.kinds.length > 0, `Empty category: ${cat.id}`);
+    for (const k of cat.kinds) {
+      assert.ok(ELEMENT_KIND_DEFAULTS[k], `Unknown kind in category ${cat.id}: ${k}`);
+      assert.equal(ELEMENT_KIND_DEFAULTS[k].category, cat.id);
+      seen.push(k);
+    }
+  }
+  assert.equal(seen.length, allDefaultKinds.length);
+  assert.equal(new Set(seen).size, allDefaultKinds.length);
+});
+
+test('supports round_table, sofa, kitchen_counter and custom wall/floor/item hex colors', () => {
+  assert.equal(ELEMENT_KIND_DEFAULTS.round_table.category, 'furniture');
+  assert.equal(ELEMENT_KIND_DEFAULTS.sofa.category, 'furniture');
+  assert.equal(ELEMENT_KIND_DEFAULTS.kitchen_counter.category, 'storage');
+
+  assert.equal(sanitizeHexColor('#A1B2C3'), '#a1b2c3');
+  assert.equal(sanitizeHexColor('red'), undefined);
+  assert.equal(sanitizeHexColor('#xyz123'), undefined);
+  assert.equal(sanitizeHexColor('123456'), undefined);
+
+  const customProject = {
+    ...CARE_ROOM_PRESET,
+    wallColor: '#d1fae5',
+    floorColor: '#b0845c',
+    elements: [
+      {
+        id: 'el-rt',
+        kind: 'round_table' as const,
+        name: '圓桌',
+        placement: 'free' as const,
+        edgeId: 'e1',
+        offsetCm: 0,
+        xCm: 140,
+        yCm: 160,
+        rotationDeg: 0,
+        widthCm: 110,
+        depthCm: 110,
+        heightCm: 75,
+        elevationCm: 0,
+        side: 'inside' as const,
+        color: '#93c5fd',
+      },
+      {
+        id: 'el-sofa',
+        kind: 'sofa' as const,
+        name: '沙發',
+        placement: 'free' as const,
+        edgeId: 'e1',
+        offsetCm: 0,
+        xCm: 280,
+        yCm: 160,
+        rotationDeg: 0,
+        widthCm: 210,
+        depthCm: 88,
+        heightCm: 82,
+        elevationCm: 0,
+        side: 'inside' as const,
+        color: '#475569',
+      },
+      {
+        id: 'el-kc',
+        kind: 'kitchen_counter' as const,
+        name: '廚房一字櫥櫃',
+        placement: 'wall' as const,
+        edgeId: 'e1',
+        offsetCm: 60,
+        widthCm: 240,
+        depthCm: 65,
+        heightCm: 85,
+        elevationCm: 0,
+        side: 'inside' as const,
+        color: '#ffffff',
+      },
+    ],
+  };
+
+  const solved = solveFloorplan(customProject);
+  const placements = resolveElementPlacements(customProject.elements, solved);
+  assert.equal(placements.length, 3);
+
+  const secNorth = createPresetSectionLine(solved, 'north', []);
+  const elevNorth = computeSectionElevation(customProject, solved, placements, secNorth);
+  assert.equal(elevNorth.furniture.find((f) => f.kind === 'round_table')?.color, '#93c5fd');
+  assert.equal(elevNorth.furniture.find((f) => f.kind === 'sofa')?.color, '#475569');
+  assert.equal(elevNorth.furniture.find((f) => f.kind === 'kitchen_counter')?.color, '#ffffff');
+
+  const svg2d = buildFloorplan2DSvgString(customProject, solved, placements);
+  assert.ok(svg2d.includes('#b0845c'), '2D SVG should include custom floorColor');
+  assert.ok(svg2d.includes('#d1fae5'), '2D SVG should include custom wallColor');
+  assert.ok(svg2d.includes('#93c5fd'), '2D SVG should include custom item color');
+  assert.ok(svg2d.includes('<ellipse'), '2D SVG should render ellipse for round_table');
+  assert.ok(svg2d.includes('廚房一字櫥櫃'));
+
+  const svgElev = buildElevationSvgString(customProject, solved, placements, secNorth, elevNorth);
+  assert.ok(svgElev.includes('#d1fae5'), 'Elevation SVG should include custom wallColor');
+  assert.ok(svgElev.includes('#475569'), 'Elevation SVG should include custom sofa color');
+
+  const sanitized = sanitizeSharedProject({
+    ...customProject,
+    wallColor: '#D1FAE5',
+    floorColor: 'not-a-hex',
+  });
+  assert.ok(sanitized);
+  assert.equal(sanitized.wallColor, '#d1fae5');
+  assert.equal(sanitized.floorColor, undefined);
+  assert.equal(sanitized.elements.find((e) => e.kind === 'sofa')?.color, '#475569');
+
+  const invalidItemColor = sanitizeSharedProject({
+    ...customProject,
+    elements: [{ ...customProject.elements[0], color: 'javascript:alert(1)' }],
+  });
+  assert.ok(invalidItemColor);
+  assert.equal(invalidItemColor.elements[0].color, undefined);
+});
+
+test('computeMagneticSnapPosition snaps to walls, interior partitions, peers, rotated extents, and disables cleanly', () => {
+  const projectWithPartition = {
+    ...CARE_ROOM_PRESET,
+    interiorWalls: [
+      {
+        id: 'iw1',
+        label: '隔間牆',
+        startXCm: 220,
+        startYCm: 0,
+        lengthCm: 200,
+        angleDeg: 90,
+        hasWall: true,
+      },
+    ],
+    elements: [
+      {
+        id: 'peer-table',
+        kind: 'table' as const,
+        name: '鄰近桌',
+        placement: 'free' as const,
+        edgeId: 'e1',
+        offsetCm: 0,
+        xCm: 320,
+        yCm: 280,
+        rotationDeg: 0,
+        widthCm: 100,
+        depthCm: 60,
+        heightCm: 75,
+        elevationCm: 0,
+        side: 'inside' as const,
+      },
+      {
+        id: 'moving-sofa',
+        kind: 'sofa' as const,
+        name: '沙發',
+        placement: 'free' as const,
+        edgeId: 'e1',
+        offsetCm: 0,
+        xCm: 100,
+        yCm: 100,
+        rotationDeg: 0,
+        widthCm: 100,
+        depthCm: 60,
+        heightCm: 82,
+        elevationCm: 0,
+        side: 'inside' as const,
+      },
+    ],
+  };
+
+  const solved = solveFloorplan(projectWithPartition);
+  const placements = resolveElementPlacements(projectWithPartition.elements, solved);
+
+  // 1. Snapping top & left edges flush against outer walls (x=0, y=0)
+  const wallSnap = computeMagneticSnapPosition({
+    elementId: 'moving-sofa',
+    candidateXCm: 56, // left edge at 6 -> within 12cm of x=0 -> snaps center to 50
+    candidateYCm: 35, // top edge at 5 -> within 12cm of y=0 -> snaps center to 30
+    widthCm: 100,
+    depthCm: 60,
+    rotationDeg: 0,
+    wallThicknessCm: 12,
+    solved,
+    placements,
+    enabled: true,
+  });
+  assert.equal(wallSnap.xCm, 50);
+  assert.equal(wallSnap.yCm, 30);
+  assert.ok(wallSnap.guides.some((g) => g.axis === 'x' && g.reason === 'wall'));
+  assert.ok(wallSnap.guides.some((g) => g.axis === 'y' && g.reason === 'wall'));
+
+  // 2. Snapping to interior partition right face (x = 220 + 6 = 226)
+  const partitionSnap = computeMagneticSnapPosition({
+    elementId: 'moving-sofa',
+    candidateXCm: 280, // left edge 230, 4cm from right face x=226 -> snaps center to 276
+    candidateYCm: 120,
+    widthCm: 100,
+    depthCm: 60,
+    rotationDeg: 0,
+    wallThicknessCm: 12,
+    solved,
+    placements,
+    enabled: true,
+  });
+  assert.equal(partitionSnap.xCm, 276);
+  assert.ok(partitionSnap.guides.some((g) => g.axis === 'x' && g.reason === 'wall'));
+
+  // 3. Snapping to adjacent peer table center X=320 and flush bottom/top edge Y=280-30=250
+  const peerSnap = computeMagneticSnapPosition({
+    elementId: 'moving-sofa',
+    candidateXCm: 325, // 5cm from peer center 320 -> snaps to 320
+    candidateYCm: 216, // bottom edge at 246, 4cm from peer top edge 250 -> snaps center to 220
+    widthCm: 100,
+    depthCm: 60,
+    rotationDeg: 0,
+    wallThicknessCm: 12,
+    solved,
+    placements,
+    enabled: true,
+  });
+  assert.equal(peerSnap.xCm, 320);
+  assert.equal(peerSnap.yCm, 220);
+  assert.ok(peerSnap.guides.some((g) => g.axis === 'x' && g.reason === 'element'));
+  assert.ok(peerSnap.guides.some((g) => g.axis === 'y' && g.reason === 'element'));
+
+  // 4. 90 deg rotation swaps half-extents (halfX=30, halfY=50)
+  const rotatedSnap = computeMagneticSnapPosition({
+    elementId: 'moving-sofa',
+    candidateXCm: 35, // left edge at 5 -> snaps center to 30
+    candidateYCm: 54, // top edge at 4 -> snaps center to 50
+    widthCm: 100,
+    depthCm: 60,
+    rotationDeg: 90,
+    wallThicknessCm: 12,
+    solved,
+    placements,
+    enabled: true,
+  });
+  assert.equal(rotatedSnap.xCm, 30);
+  assert.equal(rotatedSnap.yCm, 50);
+
+  // 5. Disabled snap returns raw rounded coordinates and no guides
+  const disabledSnap = computeMagneticSnapPosition({
+    elementId: 'moving-sofa',
+    candidateXCm: 56.4,
+    candidateYCm: 35.2,
+    widthCm: 100,
+    depthCm: 60,
+    rotationDeg: 0,
+    wallThicknessCm: 12,
+    solved,
+    placements,
+    enabled: false,
+  });
+  assert.deepEqual(disabledSnap, { xCm: 56, yCm: 35, guides: [] });
+});
+
+test('element layer visibility and uniform layer coloring propagate across placements, elevation, SVG, and shareLink', () => {
+  const defaultLayers = getEffectiveLayers();
+  assert.equal(defaultLayers.length, DEFAULT_FLOORPLAN_LAYERS.length);
+  assert.equal(getDefaultLayerIdForKind('door', defaultLayers), 'layer-opening');
+  assert.equal(getDefaultLayerIdForKind('bed', defaultLayers), 'layer-medical');
+
+  const layeredProject = {
+    ...CARE_ROOM_PRESET,
+    layers: defaultLayers.map((l) =>
+      l.id === 'layer-opening'
+        ? { ...l, visible: false }
+        : l.id === 'layer-furniture'
+          ? { ...l, color: '#2563eb' }
+          : l
+    ),
+    elements: CARE_ROOM_PRESET.elements.map((el) =>
+      el.kind === 'chair' ? { ...el, color: '#10b981' } : el
+    ),
+  };
+
+  const solved = solveFloorplan(layeredProject);
+  const allPlacements = resolveElementPlacements(layeredProject.elements, solved);
+  const visiblePlacements = applyLayersToPlacements(allPlacements, layeredProject.layers);
+
+  // Opening layer is hidden -> no doors or windows in visiblePlacements
+  assert.ok(!visiblePlacements.some((p) => p.element.kind === 'door' || p.element.kind === 'window'));
+  // Furniture layer has uniform color #2563eb applied to table (no individual override)
+  const tablePl = visiblePlacements.find((p) => p.element.kind === 'table');
+  assert.ok(tablePl);
+  assert.equal(tablePl.element.color, '#2563eb');
+  // Individual override on chair still wins over layer uniform color
+  const chairEl = layeredProject.elements.find((e) => e.kind === 'chair');
+  assert.ok(chairEl);
+  assert.equal(resolveElementEffectiveColor(chairEl, layeredProject.layers), '#10b981');
+
+  // Uniform color on opening layer propagates into 2D & Elevation SVG when visible
+  const visibleDoorProject = {
+    ...ATTACHED_SKETCH_PRESET,
+    layers: defaultLayers.map((l) =>
+      l.id === 'layer-opening' ? { ...l, visible: true, color: '#ea580c' } : l
+    ),
+  };
+  const doorSolved = solveFloorplan(visibleDoorProject);
+  const doorPlacements = applyLayersToPlacements(
+    resolveElementPlacements(visibleDoorProject.elements, doorSolved),
+    visibleDoorProject.layers
+  );
+  const svg2d = buildFloorplan2DSvgString(visibleDoorProject, doorSolved, doorPlacements);
+  assert.ok(svg2d.includes('#'), '2D SVG renders opening with layer color');
+  const secLine = createPresetSectionLine(doorSolved, 'west');
+  const elev = computeSectionElevation(visibleDoorProject, doorSolved, doorPlacements, secLine);
+  assert.ok(elev.openings.some((o) => o.color === '#ea580c'));
+  const elevSvg = buildElevationSvgString(visibleDoorProject, doorSolved, doorPlacements, secLine, elev);
+  assert.ok(elevSvg.includes('#ea580c'));
+
+  // shareLink sanitization preserves layers, layerId, and quoteItems
+  const sanitized = sanitizeSharedProject({
+    ...layeredProject,
+    elements: layeredProject.elements.map((e, i) => (i === 0 ? { ...e, layerId: 'layer-custom-1' } : e)),
+    quoteItems: [
+      {
+        id: 'q1',
+        target: 'ceiling',
+        itemName: '平釘天花板',
+        unit: 'm2',
+        quantity: 20,
+        manualQuantity: false,
+        unitPrice: 1500,
+      },
+    ],
+  });
+  assert.ok(sanitized);
+  assert.equal(sanitized.layers?.length, defaultLayers.length);
+  assert.equal(sanitized.elements[0].layerId, 'layer-custom-1');
+  assert.equal(sanitized.quoteItems?.[0].unitPrice, 1500);
+});
+
+test('quotationCalculator computes live ceiling/wall/floor areas, imports sliding door (120x210), and applies 5% tax', () => {
+  const solved = solveFloorplan(ATTACHED_SKETCH_PRESET);
+  const placements = resolveElementPlacements(ATTACHED_SKETCH_PRESET.elements, solved);
+  const wallSummary = computeWallSurfaceAreas(ATTACHED_SKETCH_PRESET, solved, placements, {
+    interiorWallFaces: 2,
+  });
+  const metrics = computeQuoteSpaceMetrics(solved, wallSummary);
+
+  assert.equal(metrics.ceilingAreaM2, Math.round(solved.areaSqMeters * 100) / 100);
+  assert.equal(metrics.floorAreaM2, Math.round(solved.areaSqMeters * 100) / 100);
+  assert.equal(metrics.wallAreaM2, Math.round(wallSummary.totalNetAreaM2 * 100) / 100);
+
+  // Blank ceiling row syncs automatically in m2 and ping
+  const ceilingRow = {
+    ...createBlankQuoteLineItem('ceiling', metrics),
+    itemName: '矽酸鈣板平釘天花板',
+    unitPrice: 1000,
+  };
+  assert.equal(resolveQuoteItemQuantity(ceilingRow, metrics).isLiveSynced, true);
+  assert.equal(resolveQuoteItemQuantity(ceilingRow, metrics).quantity, metrics.ceilingAreaM2);
+
+  // Wall row in ping syncs to wallAreaPing
+  const wallPingRow = {
+    ...createBlankQuoteLineItem('wall', metrics),
+    itemName: '乳膠漆粉刷',
+    unit: 'ping' as const,
+    unitPrice: 2000,
+  };
+  assert.equal(resolveQuoteItemQuantity(wallPingRow, metrics).quantity, metrics.wallAreaPing);
+
+  // Sliding door 120x210 imported from floorplan element
+  const slidingDoor = {
+    ...ATTACHED_SKETCH_PRESET.elements[0],
+    kind: 'door' as const,
+    name: '入口門',
+    widthCm: 120,
+    heightCm: 210,
+    swingDirection: 'sliding-inward-left' as const,
+  };
+  const doorQuote = {
+    ...buildQuoteItemFromElement(slidingDoor),
+    unitPrice: 18000,
+  };
+  assert.ok(doorQuote.itemName.includes('120×210'));
+  assert.ok(doorQuote.itemName.includes('推拉門'));
+  assert.equal(doorQuote.unit, 'pcs');
+
+  const totals = computeQuotationTotals([ceilingRow, wallPingRow, doorQuote], metrics);
+  const expectedSubtotal =
+    Math.round(metrics.ceilingAreaM2 * 1000) +
+    Math.round(metrics.wallAreaPing * 2000) +
+    18000;
+  assert.equal(totals.subtotalBeforeTax, expectedSubtotal);
+  assert.equal(totals.taxAmount, Math.round(expectedSubtotal * 0.05));
+  assert.equal(totals.grandTotal, expectedSubtotal + totals.taxAmount);
+
+  const csv = buildQuotationCsv(ATTACHED_SKETCH_PRESET.projectName, [doorQuote], metrics);
+  assert.ok(csv.startsWith('\uFEFF'), 'CSV starts with UTF-8 BOM');
+  assert.ok(csv.includes('營業稅 (5%)'));
+  assert.ok(csv.includes('18900'));
+
+  const txt = buildQuotationPlainText(ATTACHED_SKETCH_PRESET.projectName, [doorQuote], metrics);
+  assert.ok(txt.includes('含稅總計'));
+});
+
+
+
 
 
 

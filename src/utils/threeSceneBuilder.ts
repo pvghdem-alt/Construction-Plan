@@ -6,7 +6,14 @@ import type {
   SolvedFloorplan,
   SolvedWallSegment,
 } from '../types/floorplan';
-import { formatDimension, parseDoorSwing } from './floorplanGeometry';
+import {
+  darkenHexColor,
+  DEFAULT_FLOOR_COLOR,
+  DEFAULT_WALL_COLOR,
+  formatDimension,
+  parseDoorSwing,
+  sanitizeHexColor,
+} from './floorplanGeometry';
 import {
   computeCeilingRulerPosition,
   computeOpeningBadgePosition,
@@ -37,18 +44,18 @@ export function createWoodFloorTexture(maxAnisotropy: number): THREE.CanvasTextu
   canvas.height = size;
   const ctx = canvas.getContext('2d')!;
 
-  ctx.fillStyle = '#e7dccb';
+  ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, size, size);
 
   const plankRows = 8;
   const plankH = size / plankRows;
   for (let r = 0; r < plankRows; r++) {
     const y = r * plankH;
-    const tint = (r % 3) * 4 - 4;
-    ctx.fillStyle = `rgb(${228 + tint}, ${214 + tint}, ${194 + tint})`;
+    const tint = (r % 3) * 5 - 5;
+    ctx.fillStyle = `rgb(${245 + tint}, ${244 + tint}, ${242 + tint})`;
     ctx.fillRect(0, y, size, plankH - 1);
 
-    ctx.strokeStyle = 'rgba(166, 138, 100, 0.14)';
+    ctx.strokeStyle = 'rgba(90, 90, 90, 0.12)';
     ctx.lineWidth = 1;
     for (let g = 0; g < 6; g++) {
       const gy = y + 6 + g * ((plankH - 12) / 6);
@@ -58,7 +65,7 @@ export function createWoodFloorTexture(maxAnisotropy: number): THREE.CanvasTextu
       ctx.stroke();
     }
 
-    ctx.fillStyle = 'rgba(140, 115, 85, 0.25)';
+    ctx.fillStyle = 'rgba(70, 70, 70, 0.22)';
     ctx.fillRect(0, y + plankH - 1.5, size, 1.5);
 
     const seamX = ((r * 173 + 64) % (size - 40)) + 20;
@@ -214,8 +221,11 @@ export function buildRoomSceneGroup(
   const ceilingM = Math.max(1.2, project.ceilingHeightCm * CM_TO_M);
   const wallThickM = Math.max(0.06, project.wallThicknessCm * CM_TO_M);
 
+  const resolvedWallColor = sanitizeHexColor(project.wallColor) || DEFAULT_WALL_COLOR;
+  const resolvedFloorColor = sanitizeHexColor(project.floorColor) || DEFAULT_FLOOR_COLOR;
+
   const wallMat = new THREE.MeshStandardMaterial({
-    color: 0xf8fafc,
+    color: resolvedWallColor,
     roughness: 0.86,
     metalness: 0.02,
     transparent: wallTransparent,
@@ -259,7 +269,7 @@ export function buildRoomSceneGroup(
 
     const floorMat = new THREE.MeshStandardMaterial({
       map: floorTexture,
-      color: 0xffffff,
+      color: resolvedFloorColor,
       roughness: 0.68,
       metalness: 0.03,
       side: THREE.DoubleSide,
@@ -452,15 +462,86 @@ export function buildRoomSceneGroup(
     roughness: 0.82,
     metalness: 0.0,
   });
+  const ceramicMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.16,
+    metalness: 0.04,
+  });
+  const waterAccentMat = new THREE.MeshStandardMaterial({
+    color: 0x7dd3fc,
+    roughness: 0.15,
+    metalness: 0.05,
+    transparent: true,
+    opacity: 0.65,
+  });
+  const curtainFabricMat = new THREE.MeshStandardMaterial({
+    color: 0xa7f3d0,
+    roughness: 0.85,
+    metalness: 0.0,
+    side: THREE.DoubleSide,
+  });
+  const curtainMeshTopMat = new THREE.MeshStandardMaterial({
+    color: 0xecfdf5,
+    roughness: 0.78,
+    metalness: 0.0,
+    transparent: true,
+    opacity: 0.74,
+    side: THREE.DoubleSide,
+  });
+  const sofaFabricMat = new THREE.MeshStandardMaterial({
+    color: 0x64748b,
+    roughness: 0.88,
+    metalness: 0.02,
+  });
+  const sofaCushionTrimMat = new THREE.MeshStandardMaterial({
+    color: 0x475569,
+    roughness: 0.82,
+    metalness: 0.03,
+  });
+  const countertopStoneMat = new THREE.MeshStandardMaterial({
+    color: 0xf8fafc,
+    roughness: 0.25,
+    metalness: 0.04,
+  });
+  const cooktopGlassMat = new THREE.MeshStandardMaterial({
+    color: 0x0f172a,
+    roughness: 0.14,
+    metalness: 0.2,
+  });
   const selectedAccentMat = new THREE.MeshStandardMaterial({
     color: 0x3b82f6,
     roughness: 0.4,
     metalness: 0.1,
   });
+  const selectionEdgeMat = new THREE.LineBasicMaterial({
+    color: 0x2563eb,
+  });
 
   for (const pl of placements) {
     const { element, edge: se } = pl;
     const isSelected = selectedElementId === element.id;
+    const customHex = sanitizeHexColor(element.color);
+    const useSelectTint = isSelected && !customHex;
+    const customMat = customHex
+      ? new THREE.MeshStandardMaterial({
+          color: customHex,
+          roughness:
+            element.kind === 'toilet' || element.kind === 'urinal' || element.kind === 'sink'
+              ? 0.22
+              : element.kind === 'sofa' || element.kind === 'chair' || element.kind === 'bed_curtain'
+                ? 0.82
+                : 0.52,
+          metalness: element.kind === 'shower' ? 0.65 : 0.04,
+          ...(element.kind === 'bed_curtain' ? { side: THREE.DoubleSide } : {}),
+        })
+      : null;
+    const customDarkMat = customHex
+      ? new THREE.MeshStandardMaterial({
+          color: darkenHexColor(customHex, 0.72),
+          roughness: 0.56,
+          metalness: 0.05,
+        })
+      : null;
     const wM = pl.clampedWidthCm * CM_TO_M;
     const dM = Math.max(0.06, element.depthCm * CM_TO_M);
     const hM = Math.min(ceilingM, Math.max(0.2, element.heightCm * CM_TO_M));
@@ -478,7 +559,7 @@ export function buildRoomSceneGroup(
 
       const jambT = 0.045;
       const jambDepth = wallThickM + 0.02;
-      const activeFrameMat = isSelected ? selectedAccentMat : frameWoodMat;
+      const activeFrameMat = useSelectTint ? selectedAccentMat : customDarkMat ?? frameWoodMat;
 
       const leftJamb = new THREE.Mesh(
         new THREE.BoxGeometry(jambT, hM, jambDepth),
@@ -550,7 +631,7 @@ export function buildRoomSceneGroup(
 
         const slidingPanel = new THREE.Mesh(
           new THREE.BoxGeometry(panelW, leafH + 0.02, 0.042),
-          isSelected ? selectedAccentMat : doorLeafMat
+          useSelectTint ? selectedAccentMat : customMat ?? doorLeafMat
         );
         slidingPanel.position.set(panelCenterX, (leafH + 0.02) * 0.5 + 0.01, trackOffsetZ);
         slidingPanel.castShadow = !isSoftwareGl;
@@ -580,7 +661,7 @@ export function buildRoomSceneGroup(
 
         const leafMesh = new THREE.Mesh(
           new THREE.BoxGeometry(leafW, leafH, 0.042),
-          isSelected ? selectedAccentMat : doorLeafMat
+          useSelectTint ? selectedAccentMat : customMat ?? doorLeafMat
         );
         leafMesh.position.set(isRight ? -leafW * 0.5 : leafW * 0.5, leafH * 0.5, 0);
         leafMesh.castShadow = !isSoftwareGl;
@@ -612,7 +693,7 @@ export function buildRoomSceneGroup(
 
       const frameT = 0.045;
       const frameD = wallThickM + 0.015;
-      const activeAlum = isSelected ? selectedAccentMat : windowAlumMat;
+      const activeAlum = useSelectTint ? selectedAccentMat : customMat ?? windowAlumMat;
 
       const sill = new THREE.Mesh(
         new THREE.BoxGeometry(wM + 0.06, 0.03, frameD + 0.06),
@@ -661,7 +742,7 @@ export function buildRoomSceneGroup(
 
       const topMesh = new THREE.Mesh(
         new THREE.BoxGeometry(wM, topT, dM),
-        isSelected ? selectedAccentMat : tableTopMat
+        useSelectTint ? selectedAccentMat : customMat ?? tableTopMat
       );
       topMesh.position.set(0, hM - topT * 0.5, 0);
       topMesh.castShadow = !isSoftwareGl;
@@ -699,7 +780,165 @@ export function buildRoomSceneGroup(
         tableGroup.add(outline);
       }
 
+      if (isSelected && customHex) {
+        const selOutline = new THREE.LineSegments(
+          new THREE.EdgesGeometry(new THREE.BoxGeometry(wM + 0.03, hM + 0.03, dM + 0.03)),
+          selectionEdgeMat
+        );
+        selOutline.position.set(0, hM * 0.5, 0);
+        tableGroup.add(selOutline);
+      }
+
       roomGroup.add(tableGroup);
+    } else if (element.kind === 'round_table') {
+      const rtGroup = new THREE.Group();
+      const normalDir = pl.facingNormal;
+      rtGroup.position.set(pl.boxCenter.x * CM_TO_M, elevM, pl.boxCenter.y * CM_TO_M);
+      rtGroup.rotation.y = Math.atan2(normalDir.x, normalDir.y);
+
+      const topT = Math.min(0.045, hM * 0.1);
+      const baseH = 0.028;
+      const colH = Math.max(0.12, hM - topT - baseH);
+      const activeTopMat = useSelectTint ? selectedAccentMat : customMat ?? tableTopMat;
+
+      const discGeo = new THREE.CylinderGeometry(0.5, 0.5, topT, 28);
+      const tabletop = new THREE.Mesh(discGeo, activeTopMat);
+      tabletop.scale.set(wM, 1, dM);
+      tabletop.position.set(0, hM - topT * 0.5, 0);
+      tabletop.castShadow = !isSoftwareGl;
+      tabletop.receiveShadow = !isSoftwareGl;
+      rtGroup.add(tabletop);
+
+      const collarR = Math.min(wM, dM) * 0.2;
+      const collar = new THREE.Mesh(
+        new THREE.CylinderGeometry(collarR, collarR * 0.65, 0.035, 18),
+        darkLegMat
+      );
+      collar.position.set(0, hM - topT - 0.0175, 0);
+      rtGroup.add(collar);
+
+      const column = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.048, 0.068, colH, 16),
+        darkLegMat
+      );
+      column.position.set(0, baseH + colH * 0.5, 0);
+      column.castShadow = !isSoftwareGl;
+      rtGroup.add(column);
+
+      const baseR = Math.min(0.32, Math.min(wM, dM) * 0.28);
+      const basePlate = new THREE.Mesh(
+        new THREE.CylinderGeometry(baseR * 0.85, baseR, baseH, 24),
+        darkLegMat
+      );
+      basePlate.position.set(0, baseH * 0.5, 0);
+      basePlate.receiveShadow = !isSoftwareGl;
+      rtGroup.add(basePlate);
+
+      if (isSelected && customHex) {
+        const selOutline = new THREE.LineSegments(
+          new THREE.EdgesGeometry(new THREE.BoxGeometry(wM + 0.03, hM + 0.03, dM + 0.03)),
+          selectionEdgeMat
+        );
+        selOutline.position.set(0, hM * 0.5, 0);
+        rtGroup.add(selOutline);
+      }
+
+      roomGroup.add(rtGroup);
+    } else if (element.kind === 'sofa') {
+      const sofaGroup = new THREE.Group();
+      const normalDir = pl.facingNormal;
+      sofaGroup.position.set(pl.boxCenter.x * CM_TO_M, elevM, pl.boxCenter.y * CM_TO_M);
+      sofaGroup.rotation.y = Math.atan2(normalDir.x, normalDir.y);
+
+      const activeUpholstery = useSelectTint ? selectedAccentMat : customMat ?? sofaFabricMat;
+      const activeTrim = useSelectTint ? selectedAccentMat : customDarkMat ?? sofaCushionTrimMat;
+
+      const legH = 0.1;
+      const basePlinthH = 0.12;
+      const seatH = Math.min(0.43, hM * 0.52);
+      const cushionH = Math.max(0.08, seatH - legH - basePlinthH);
+      const armW = Math.min(0.18, wM * 0.11);
+      const armH = Math.max(seatH + 0.12, hM * 0.72) - legH;
+      const backD = Math.min(0.2, dM * 0.24);
+      const backH = Math.max(seatH + 0.2, hM - legH);
+
+      const legGeo = new THREE.CylinderGeometry(0.024, 0.016, legH, 10);
+      const lxOff = Math.max(0.08, wM * 0.5 - 0.08);
+      const lzOff = Math.max(0.08, dM * 0.5 - 0.08);
+      for (const [lx, lz] of [
+        [-lxOff, -lzOff],
+        [lxOff, -lzOff],
+        [-lxOff, lzOff],
+        [lxOff, lzOff],
+      ]) {
+        const leg = new THREE.Mesh(legGeo, darkLegMat);
+        leg.position.set(lx, legH * 0.5, lz);
+        sofaGroup.add(leg);
+      }
+
+      const lowerDeck = new THREE.Mesh(
+        new THREE.BoxGeometry(wM - 0.02, basePlinthH, dM - 0.02),
+        activeTrim
+      );
+      lowerDeck.position.set(0, legH + basePlinthH * 0.5, 0);
+      lowerDeck.castShadow = !isSoftwareGl;
+      sofaGroup.add(lowerDeck);
+
+      const backrest = new THREE.Mesh(
+        new THREE.BoxGeometry(wM, backH, backD),
+        activeTrim
+      );
+      backrest.position.set(0, legH + backH * 0.5, -dM * 0.5 + backD * 0.5);
+      backrest.castShadow = !isSoftwareGl;
+      sofaGroup.add(backrest);
+
+      for (const sideSign of [-1, 1]) {
+        const armrest = new THREE.Mesh(
+          new THREE.BoxGeometry(armW, armH, dM - 0.02),
+          activeTrim
+        );
+        armrest.position.set(sideSign * (wM * 0.5 - armW * 0.5), legH + armH * 0.5, 0);
+        armrest.castShadow = !isSoftwareGl;
+        sofaGroup.add(armrest);
+      }
+
+      const innerW = Math.max(0.3, wM - armW * 2 - 0.02);
+      const seatD = Math.max(0.25, dM - backD - 0.02);
+      const cushionCount = wM >= 1.7 ? 3 : wM >= 1.05 ? 2 : 1;
+      const gap = 0.015;
+      const singleW = (innerW - gap * (cushionCount - 1)) / cushionCount;
+      const pillowH = Math.max(0.16, hM - seatH - 0.04);
+
+      for (let i = 0; i < cushionCount; i++) {
+        const cx = -innerW * 0.5 + singleW * 0.5 + i * (singleW + gap);
+        const seatCushion = new THREE.Mesh(
+          new THREE.BoxGeometry(singleW, cushionH, seatD),
+          activeUpholstery
+        );
+        seatCushion.position.set(cx, legH + basePlinthH + cushionH * 0.5, backD * 0.5);
+        seatCushion.castShadow = !isSoftwareGl;
+        seatCushion.receiveShadow = !isSoftwareGl;
+        sofaGroup.add(seatCushion);
+
+        const backPillow = new THREE.Mesh(
+          new THREE.BoxGeometry(singleW * 0.96, pillowH, 0.13),
+          activeUpholstery
+        );
+        backPillow.position.set(cx, seatH + pillowH * 0.5 - 0.02, -dM * 0.5 + backD + 0.065);
+        backPillow.rotation.x = -0.1;
+        sofaGroup.add(backPillow);
+      }
+
+      if (isSelected && customHex) {
+        const selOutline = new THREE.LineSegments(
+          new THREE.EdgesGeometry(new THREE.BoxGeometry(wM + 0.03, hM + 0.03, dM + 0.03)),
+          selectionEdgeMat
+        );
+        selOutline.position.set(0, hM * 0.5, 0);
+        sofaGroup.add(selOutline);
+      }
+
+      roomGroup.add(sofaGroup);
     } else if (element.kind === 'chair') {
       const chairGroup = new THREE.Group();
       const normalDir = pl.facingNormal;
@@ -713,7 +952,7 @@ export function buildRoomSceneGroup(
 
       const seat = new THREE.Mesh(
         new THREE.BoxGeometry(wM, seatT, dM),
-        isSelected ? selectedAccentMat : chairFabricMat
+        useSelectTint ? selectedAccentMat : customMat ?? chairFabricMat
       );
       seat.position.set(0, seatH - seatT * 0.5, 0);
       seat.castShadow = !isSoftwareGl;
@@ -746,11 +985,20 @@ export function buildRoomSceneGroup(
       const backPanelH = backH * 0.68;
       const backPanel = new THREE.Mesh(
         new THREE.BoxGeometry(wM * 0.94, backPanelH, 0.04),
-        isSelected ? selectedAccentMat : chairFabricMat
+        useSelectTint ? selectedAccentMat : customMat ?? chairFabricMat
       );
       backPanel.position.set(0, hM - backPanelH * 0.5 - 0.02, -dM * 0.5 + 0.03);
       backPanel.castShadow = !isSoftwareGl;
       chairGroup.add(backPanel);
+
+      if (isSelected && customHex) {
+        const selOutline = new THREE.LineSegments(
+          new THREE.EdgesGeometry(new THREE.BoxGeometry(wM + 0.03, hM + 0.03, dM + 0.03)),
+          selectionEdgeMat
+        );
+        selOutline.position.set(0, hM * 0.5, 0);
+        chairGroup.add(selOutline);
+      }
 
       roomGroup.add(chairGroup);
     } else if (element.kind === 'bed') {
@@ -788,14 +1036,14 @@ export function buildRoomSceneGroup(
 
       const mattress = new THREE.Mesh(
         new THREE.BoxGeometry(wM - 0.05, mattressH, dM - 0.09),
-        isSelected ? selectedAccentMat : mattressMat
+        useSelectTint ? selectedAccentMat : mattressMat
       );
       mattress.position.set(0, casterH + frameH + mattressH * 0.5, 0);
       mattress.castShadow = !isSoftwareGl;
       mattress.receiveShadow = !isSoftwareGl;
       bedGroup.add(mattress);
 
-      const activeBoardMat = isSelected ? selectedAccentMat : bedFrameMat;
+      const activeBoardMat = useSelectTint ? selectedAccentMat : customDarkMat ?? bedFrameMat;
       const hbH = Math.min(ceilingM - 0.1, Math.max(mattressTop + 0.34, 0.94));
       const hb = new THREE.Mesh(new THREE.BoxGeometry(wM, hbH - casterH, 0.045), activeBoardMat);
       hb.position.set(0, casterH + (hbH - casterH) * 0.5, -dM * 0.5 + 0.0225);
@@ -819,7 +1067,7 @@ export function buildRoomSceneGroup(
       const blanketD = dM * 0.58;
       const blanket = new THREE.Mesh(
         new THREE.BoxGeometry(wM - 0.025, 0.045, blanketD),
-        blanketMat
+        useSelectTint ? selectedAccentMat : customMat ?? blanketMat
       );
       blanket.position.set(0, mattressTop + 0.015, dM * 0.5 - 0.06 - blanketD * 0.5);
       bedGroup.add(blanket);
@@ -851,6 +1099,529 @@ export function buildRoomSceneGroup(
       }
 
       roomGroup.add(bedGroup);
+    } else if (element.kind === 'wall_cabinet') {
+      const wcGroup = new THREE.Group();
+      const normalDir = pl.facingNormal;
+      wcGroup.position.set(pl.boxCenter.x * CM_TO_M, elevM, pl.boxCenter.y * CM_TO_M);
+      wcGroup.rotation.y = Math.atan2(normalDir.x, normalDir.y);
+
+      const trimH = 0.022;
+      const bodyH = Math.max(0.16, hM - trimH * 2);
+
+      const bottomTrim = new THREE.Mesh(
+        new THREE.BoxGeometry(wM, trimH, dM),
+        useSelectTint ? selectedAccentMat : customDarkMat ?? cabDoorMat
+      );
+      bottomTrim.position.set(0, trimH * 0.5, 0);
+      wcGroup.add(bottomTrim);
+
+      const body = new THREE.Mesh(
+        new THREE.BoxGeometry(wM, bodyH, dM - 0.022),
+        useSelectTint ? selectedAccentMat : customMat ?? cabBodyMat
+      );
+      body.position.set(0, trimH + bodyH * 0.5, -0.011);
+      body.castShadow = !isSoftwareGl;
+      body.receiveShadow = !isSoftwareGl;
+      wcGroup.add(body);
+
+      const topTrim = new THREE.Mesh(
+        new THREE.BoxGeometry(wM + 0.008, trimH, dM + 0.006),
+        useSelectTint ? selectedAccentMat : customDarkMat ?? cabDoorMat
+      );
+      topTrim.position.set(0, trimH + bodyH + trimH * 0.5, 0);
+      wcGroup.add(topTrim);
+
+      const numDoors = wM > 0.75 ? 2 : 1;
+      const doorGap = 0.012;
+      const singleDoorW = (wM - doorGap * (numDoors + 1)) / numDoors;
+      for (let dIdx = 0; dIdx < numDoors; dIdx++) {
+        const dx = -wM * 0.5 + doorGap + singleDoorW * 0.5 + dIdx * (singleDoorW + doorGap);
+        const doorPanel = new THREE.Mesh(
+          new THREE.BoxGeometry(singleDoorW, bodyH - 0.014, 0.02),
+          useSelectTint ? selectedAccentMat : customDarkMat ?? cabDoorMat
+        );
+        doorPanel.position.set(dx, trimH + bodyH * 0.5, dM * 0.5 - 0.01);
+        wcGroup.add(doorPanel);
+
+        const handleOffset =
+          numDoors === 2
+            ? dIdx === 0
+              ? singleDoorW * 0.34
+              : -singleDoorW * 0.34
+            : -singleDoorW * 0.34;
+        const handle = new THREE.Mesh(
+          new THREE.BoxGeometry(0.014, Math.min(0.18, bodyH * 0.32), 0.02),
+          metalMat
+        );
+        handle.position.set(dx + handleOffset, trimH + Math.min(0.14, bodyH * 0.25), dM * 0.5 + 0.008);
+        wcGroup.add(handle);
+      }
+
+      if (showWireframe) {
+        const outline = new THREE.LineSegments(
+          new THREE.EdgesGeometry(new THREE.BoxGeometry(wM, hM, dM), 20),
+          wallEdgeLineMat
+        );
+        outline.position.set(0, hM * 0.5, 0);
+        wcGroup.add(outline);
+      }
+
+      roomGroup.add(wcGroup);
+    } else if (element.kind === 'toilet') {
+      const toiletGroup = new THREE.Group();
+      const normalDir = pl.facingNormal;
+      toiletGroup.position.set(pl.boxCenter.x * CM_TO_M, elevM, pl.boxCenter.y * CM_TO_M);
+      toiletGroup.rotation.y = Math.atan2(normalDir.x, normalDir.y);
+
+      const activeCeramic = useSelectTint ? selectedAccentMat : customMat ?? ceramicMat;
+      const tankD = Math.min(0.22, dM * 0.33);
+      const tankW = Math.min(wM * 0.94, 0.42);
+      const tankH = Math.max(0.32, hM - 0.38);
+      const seatH = Math.min(0.42, hM * 0.56);
+
+      const tank = new THREE.Mesh(
+        new THREE.BoxGeometry(tankW, tankH, tankD),
+        activeCeramic
+      );
+      tank.position.set(0, seatH - 0.04 + tankH * 0.5, -dM * 0.5 + tankD * 0.5 + 0.01);
+      tank.castShadow = !isSoftwareGl;
+      toiletGroup.add(tank);
+
+      const tankLid = new THREE.Mesh(
+        new THREE.BoxGeometry(tankW + 0.016, 0.025, tankD + 0.016),
+        activeCeramic
+      );
+      tankLid.position.set(0, seatH - 0.04 + tankH + 0.0125, -dM * 0.5 + tankD * 0.5 + 0.01);
+      toiletGroup.add(tankLid);
+
+      const flushBtn = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.02, 0.02, 0.012, 14),
+        metalMat
+      );
+      flushBtn.position.set(0, seatH - 0.04 + tankH + 0.028, -dM * 0.5 + tankD * 0.5 + 0.01);
+      toiletGroup.add(flushBtn);
+
+      const bowlZ = -dM * 0.5 + tankD + (dM - tankD) * 0.52;
+      const bowlRx = Math.min(wM * 0.44, 0.19);
+      const pedestal = new THREE.Mesh(
+        new THREE.CylinderGeometry(bowlRx * 0.78, bowlRx * 0.68, seatH * 0.68, 16),
+        activeCeramic
+      );
+      pedestal.position.set(0, seatH * 0.34, bowlZ - 0.02);
+      pedestal.scale.set(1, 1, 1.25);
+      pedestal.castShadow = !isSoftwareGl;
+      toiletGroup.add(pedestal);
+
+      const bowlRim = new THREE.Mesh(
+        new THREE.CylinderGeometry(bowlRx, bowlRx * 0.78, seatH * 0.36, 18),
+        activeCeramic
+      );
+      bowlRim.position.set(0, seatH * 0.82, bowlZ);
+      bowlRim.scale.set(1, 1, 1.24);
+      bowlRim.castShadow = !isSoftwareGl;
+      toiletGroup.add(bowlRim);
+
+      const seatRing = new THREE.Mesh(
+        new THREE.CylinderGeometry(bowlRx * 0.96, bowlRx * 0.96, 0.024, 18),
+        activeCeramic
+      );
+      seatRing.position.set(0, seatH + 0.012, bowlZ);
+      seatRing.scale.set(1, 1, 1.22);
+      toiletGroup.add(seatRing);
+
+      const bowlWater = new THREE.Mesh(
+        new THREE.CylinderGeometry(bowlRx * 0.65, bowlRx * 0.5, 0.01, 14),
+        waterAccentMat
+      );
+      bowlWater.position.set(0, seatH + 0.021, bowlZ);
+      bowlWater.scale.set(1, 1, 1.15);
+      toiletGroup.add(bowlWater);
+
+      roomGroup.add(toiletGroup);
+    } else if (element.kind === 'urinal') {
+      const urinalGroup = new THREE.Group();
+      const normalDir = pl.facingNormal;
+      urinalGroup.position.set(pl.boxCenter.x * CM_TO_M, elevM, pl.boxCenter.y * CM_TO_M);
+      urinalGroup.rotation.y = Math.atan2(normalDir.x, normalDir.y);
+
+      const activeCeramic = useSelectTint ? selectedAccentMat : customMat ?? ceramicMat;
+      const bodyW = Math.min(wM * 0.9, 0.36);
+      const bodyD = Math.max(0.16, dM * 0.85);
+      const basinH = Math.max(0.4, hM * 0.74);
+
+      const backPlate = new THREE.Mesh(
+        new THREE.BoxGeometry(bodyW, basinH, 0.04),
+        activeCeramic
+      );
+      backPlate.position.set(0, basinH * 0.5, -dM * 0.5 + 0.02);
+      backPlate.castShadow = !isSoftwareGl;
+      urinalGroup.add(backPlate);
+
+      const leftCheek = new THREE.Mesh(
+        new THREE.BoxGeometry(0.036, basinH * 0.72, bodyD * 0.72),
+        activeCeramic
+      );
+      leftCheek.position.set(-bodyW * 0.5 + 0.018, basinH * 0.45, -dM * 0.5 + bodyD * 0.38);
+      urinalGroup.add(leftCheek);
+
+      const rightCheek = new THREE.Mesh(
+        new THREE.BoxGeometry(0.036, basinH * 0.72, bodyD * 0.72),
+        activeCeramic
+      );
+      rightCheek.position.set(bodyW * 0.5 - 0.018, basinH * 0.45, -dM * 0.5 + bodyD * 0.38);
+      urinalGroup.add(rightCheek);
+
+      const bowlCup = new THREE.Mesh(
+        new THREE.CylinderGeometry(bodyW * 0.48, bodyW * 0.32, basinH * 0.38, 16),
+        activeCeramic
+      );
+      bowlCup.position.set(0, basinH * 0.2, -dM * 0.5 + bodyD * 0.46);
+      bowlCup.scale.set(1, 1, Math.max(0.75, bodyD / bodyW));
+      bowlCup.castShadow = !isSoftwareGl;
+      urinalGroup.add(bowlCup);
+
+      const flushPipe = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.014, 0.014, Math.max(0.14, hM - basinH), 10),
+        metalMat
+      );
+      flushPipe.position.set(0, basinH + (hM - basinH) * 0.45, -dM * 0.5 + 0.05);
+      urinalGroup.add(flushPipe);
+
+      const flushValve = new THREE.Mesh(
+        new THREE.BoxGeometry(0.075, 0.075, 0.055),
+        metalMat
+      );
+      flushValve.position.set(0, hM - 0.05, -dM * 0.5 + 0.055);
+      urinalGroup.add(flushValve);
+
+      roomGroup.add(urinalGroup);
+    } else if (element.kind === 'shower') {
+      const showerGroup = new THREE.Group();
+      const normalDir = pl.facingNormal;
+      showerGroup.position.set(pl.boxCenter.x * CM_TO_M, elevM, pl.boxCenter.y * CM_TO_M);
+      showerGroup.rotation.y = Math.atan2(normalDir.x, normalDir.y);
+
+      const activeMetal = useSelectTint ? selectedAccentMat : customMat ?? metalMat;
+      const backZ = -dM * 0.5 + 0.03;
+
+      const riser = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.014, 0.014, hM - 0.14, 12),
+        activeMetal
+      );
+      riser.position.set(0, (hM - 0.08) * 0.5 + 0.04, backZ);
+      showerGroup.add(riser);
+
+      const mixerBar = new THREE.Mesh(
+        new THREE.BoxGeometry(Math.min(wM * 0.78, 0.26), 0.04, 0.055),
+        activeMetal
+      );
+      mixerBar.position.set(0, 0.15, backZ + 0.025);
+      showerGroup.add(mixerBar);
+
+      const armLen = Math.max(0.2, dM * 0.78);
+      const topArm = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.012, 0.012, armLen, 10),
+        activeMetal
+      );
+      topArm.rotation.x = Math.PI * 0.5;
+      topArm.position.set(0, hM - 0.04, backZ + armLen * 0.5);
+      showerGroup.add(topArm);
+
+      const rainHead = new THREE.Mesh(
+        new THREE.CylinderGeometry(Math.min(wM * 0.36, 0.11), Math.min(wM * 0.36, 0.11), 0.022, 20),
+        activeMetal
+      );
+      rainHead.position.set(0, hM - 0.075, backZ + armLen - 0.04);
+      rainHead.castShadow = !isSoftwareGl;
+      showerGroup.add(rainHead);
+
+      const sprayCone = new THREE.Mesh(
+        new THREE.CylinderGeometry(Math.min(wM * 0.3, 0.09), Math.min(wM * 0.48, 0.16), Math.max(0.25, hM * 0.42), 16, 1, true),
+        waterAccentMat
+      );
+      sprayCone.position.set(0, hM - 0.09 - Math.max(0.25, hM * 0.42) * 0.5, backZ + armLen - 0.04);
+      showerGroup.add(sprayCone);
+
+      roomGroup.add(showerGroup);
+    } else if (element.kind === 'sink') {
+      const sinkGroup = new THREE.Group();
+      const normalDir = pl.facingNormal;
+      sinkGroup.position.set(pl.boxCenter.x * CM_TO_M, elevM, pl.boxCenter.y * CM_TO_M);
+      sinkGroup.rotation.y = Math.atan2(normalDir.x, normalDir.y);
+
+      const activeCeramic = useSelectTint ? selectedAccentMat : customMat ?? ceramicMat;
+      const counterH = 0.065;
+      const apronH = 0.12;
+      const basinTopY = hM;
+
+      const counterSlab = new THREE.Mesh(
+        new THREE.BoxGeometry(wM, counterH, dM),
+        activeCeramic
+      );
+      counterSlab.position.set(0, basinTopY - counterH * 0.5, 0);
+      counterSlab.castShadow = !isSoftwareGl;
+      counterSlab.receiveShadow = !isSoftwareGl;
+      sinkGroup.add(counterSlab);
+
+      const apron = new THREE.Mesh(
+        new THREE.BoxGeometry(wM * 0.88, apronH, dM * 0.82),
+        activeCeramic
+      );
+      apron.position.set(0, basinTopY - counterH - apronH * 0.5, -dM * 0.04);
+      sinkGroup.add(apron);
+
+      const backSplash = new THREE.Mesh(
+        new THREE.BoxGeometry(wM, 0.065, 0.026),
+        activeCeramic
+      );
+      backSplash.position.set(0, basinTopY + 0.0325, -dM * 0.5 + 0.013);
+      sinkGroup.add(backSplash);
+
+      const basinInner = new THREE.Mesh(
+        new THREE.BoxGeometry(wM * 0.72, 0.012, dM * 0.58),
+        waterAccentMat
+      );
+      basinInner.position.set(0, basinTopY + 0.004, dM * 0.05);
+      sinkGroup.add(basinInner);
+
+      const pedestalH = Math.max(0.15, basinTopY - counterH - apronH);
+      const pedestal = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.085, 0.105, pedestalH, 16),
+        activeCeramic
+      );
+      pedestal.position.set(0, pedestalH * 0.5, -dM * 0.12);
+      pedestal.castShadow = !isSoftwareGl;
+      sinkGroup.add(pedestal);
+
+      // Chrome gooseneck faucet
+      const faucetStem = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.014, 0.016, 0.14, 10),
+        metalMat
+      );
+      faucetStem.position.set(0, basinTopY + 0.07, -dM * 0.5 + 0.06);
+      sinkGroup.add(faucetStem);
+
+      const faucetSpout = new THREE.Mesh(
+        new THREE.BoxGeometry(0.024, 0.02, 0.11),
+        metalMat
+      );
+      faucetSpout.position.set(0, basinTopY + 0.135, -dM * 0.5 + 0.105);
+      sinkGroup.add(faucetSpout);
+
+      roomGroup.add(sinkGroup);
+    } else if (element.kind === 'bed_curtain') {
+      const curtainGroup = new THREE.Group();
+      const normalDir = pl.facingNormal;
+      curtainGroup.position.set(pl.boxCenter.x * CM_TO_M, elevM, pl.boxCenter.y * CM_TO_M);
+      curtainGroup.rotation.y = Math.atan2(normalDir.x, normalDir.y);
+
+      const topLocalY = Math.max(0.4, Math.min(ceilingM - 0.03 - elevM, hM));
+      const meshBandH = Math.min(0.42, topLocalY * 0.24);
+      const bodyH = Math.max(0.2, topLocalY - meshBandH);
+      const activeFabric = useSelectTint ? selectedAccentMat : customMat ?? curtainFabricMat;
+
+      // Left arm (along Z at x = -wM/2 + 0.018) and front arm (along X at z = +dM/2 - 0.018)
+      const leftX = -wM * 0.5 + 0.018;
+      const frontZ = dM * 0.5 - 0.018;
+
+      const leftBody = new THREE.Mesh(new THREE.BoxGeometry(0.02, bodyH, dM), activeFabric);
+      leftBody.position.set(leftX, bodyH * 0.5, 0);
+      leftBody.castShadow = !isSoftwareGl;
+      curtainGroup.add(leftBody);
+
+      const leftTopMesh = new THREE.Mesh(
+        new THREE.BoxGeometry(0.014, meshBandH, dM),
+        curtainMeshTopMat
+      );
+      leftTopMesh.position.set(leftX, bodyH + meshBandH * 0.5, 0);
+      curtainGroup.add(leftTopMesh);
+
+      const frontBody = new THREE.Mesh(new THREE.BoxGeometry(wM, bodyH, 0.02), activeFabric);
+      frontBody.position.set(0, bodyH * 0.5, frontZ);
+      frontBody.castShadow = !isSoftwareGl;
+      curtainGroup.add(frontBody);
+
+      const frontTopMesh = new THREE.Mesh(
+        new THREE.BoxGeometry(wM, meshBandH, 0.014),
+        curtainMeshTopMat
+      );
+      frontTopMesh.position.set(0, bodyH + meshBandH * 0.5, frontZ);
+      curtainGroup.add(frontTopMesh);
+
+      // Subtle vertical pleat ribs along both curtain faces for architectural texture
+      const zPleatCount = Math.max(3, Math.floor(dM / 0.3));
+      for (let i = 1; i < zPleatCount; i++) {
+        const pz = -dM * 0.5 + (i / zPleatCount) * dM;
+        const rib = new THREE.Mesh(new THREE.BoxGeometry(0.034, bodyH, 0.014), activeFabric);
+        rib.position.set(leftX, bodyH * 0.5, pz);
+        curtainGroup.add(rib);
+      }
+      const xPleatCount = Math.max(3, Math.floor(wM / 0.3));
+      for (let i = 1; i < xPleatCount; i++) {
+        const px = -wM * 0.5 + (i / xPleatCount) * wM;
+        const rib = new THREE.Mesh(new THREE.BoxGeometry(0.014, bodyH, 0.034), activeFabric);
+        rib.position.set(px, bodyH * 0.5, frontZ);
+        curtainGroup.add(rib);
+      }
+
+      // Metallic L-shaped ceiling track & suspension hangers to ceiling
+      const trackLeft = new THREE.Mesh(new THREE.BoxGeometry(0.032, 0.028, dM + 0.02), metalMat);
+      trackLeft.position.set(leftX, topLocalY, 0);
+      curtainGroup.add(trackLeft);
+
+      const trackFront = new THREE.Mesh(new THREE.BoxGeometry(wM + 0.02, 0.028, 0.032), metalMat);
+      trackFront.position.set(0, topLocalY, frontZ);
+      curtainGroup.add(trackFront);
+
+      const ceilingGap = ceilingM - elevM - topLocalY;
+      if (ceilingGap > 0.04) {
+        const rodGeo = new THREE.CylinderGeometry(0.008, 0.008, ceilingGap, 8);
+        for (const [rx, rz] of [
+          [leftX, -dM * 0.44],
+          [leftX, frontZ],
+          [wM * 0.44, frontZ],
+        ]) {
+          const rod = new THREE.Mesh(rodGeo, metalMat);
+          rod.position.set(rx, topLocalY + ceilingGap * 0.5, rz);
+          curtainGroup.add(rod);
+        }
+      }
+
+      roomGroup.add(curtainGroup);
+    } else if (element.kind === 'kitchen_counter') {
+      const kcGroup = new THREE.Group();
+      const normalDir = pl.facingNormal;
+      kcGroup.position.set(pl.boxCenter.x * CM_TO_M, elevM, pl.boxCenter.y * CM_TO_M);
+      kcGroup.rotation.y = Math.atan2(normalDir.x, normalDir.y);
+
+      const plinthH = 0.09;
+      const topH = 0.04;
+      const bodyH = Math.max(0.25, hM - plinthH - topH);
+      const activeBody = useSelectTint ? selectedAccentMat : customMat ?? cabBodyMat;
+      const activeDoor = useSelectTint ? selectedAccentMat : customDarkMat ?? cabDoorMat;
+
+      const plinth = new THREE.Mesh(
+        new THREE.BoxGeometry(wM - 0.02, plinthH, dM - 0.05),
+        cabPlinthMat
+      );
+      plinth.position.set(0, plinthH * 0.5, -0.02);
+      kcGroup.add(plinth);
+
+      const carcass = new THREE.Mesh(
+        new THREE.BoxGeometry(wM, bodyH, dM - 0.03),
+        activeBody
+      );
+      carcass.position.set(0, plinthH + bodyH * 0.5, -0.015);
+      carcass.castShadow = !isSoftwareGl;
+      carcass.receiveShadow = !isSoftwareGl;
+      kcGroup.add(carcass);
+
+      const counterSlab = new THREE.Mesh(
+        new THREE.BoxGeometry(wM + 0.015, topH, dM + 0.015),
+        useSelectTint ? selectedAccentMat : countertopStoneMat
+      );
+      counterSlab.position.set(0, plinthH + bodyH + topH * 0.5, 0);
+      counterSlab.castShadow = !isSoftwareGl;
+      counterSlab.receiveShadow = !isSoftwareGl;
+      kcGroup.add(counterSlab);
+
+      const backsplash = new THREE.Mesh(
+        new THREE.BoxGeometry(wM + 0.015, 0.08, 0.022),
+        useSelectTint ? selectedAccentMat : countertopStoneMat
+      );
+      backsplash.position.set(0, hM + 0.04, -dM * 0.5 + 0.005);
+      kcGroup.add(backsplash);
+
+      const numDoors = Math.max(2, Math.round(wM / 0.55));
+      const doorGap = 0.012;
+      const singleDoorW = (wM - doorGap * (numDoors + 1)) / numDoors;
+      for (let i = 0; i < numDoors; i++) {
+        const dx = -wM * 0.5 + doorGap + singleDoorW * 0.5 + i * (singleDoorW + doorGap);
+        const door = new THREE.Mesh(
+          new THREE.BoxGeometry(singleDoorW, bodyH - 0.024, 0.02),
+          activeDoor
+        );
+        door.position.set(dx, plinthH + bodyH * 0.5, dM * 0.5 - 0.015);
+        kcGroup.add(door);
+
+        const barHandle = new THREE.Mesh(
+          new THREE.BoxGeometry(Math.min(0.14, singleDoorW * 0.42), 0.014, 0.022),
+          metalMat
+        );
+        barHandle.position.set(dx, plinthH + bodyH - 0.08, dM * 0.5 + 0.005);
+        kcGroup.add(barHandle);
+      }
+
+      // Left stainless steel sink + chrome faucet
+      const sinkW = Math.min(0.68, wM * 0.28);
+      const sinkD = Math.min(0.42, dM * 0.64);
+      const sinkX = -wM * 0.26;
+      const sinkRim = new THREE.Mesh(
+        new THREE.BoxGeometry(sinkW, 0.012, sinkD),
+        metalMat
+      );
+      sinkRim.position.set(sinkX, hM + 0.006, 0.02);
+      kcGroup.add(sinkRim);
+
+      const sinkWater = new THREE.Mesh(
+        new THREE.BoxGeometry(sinkW * 0.86, 0.014, sinkD * 0.8),
+        waterAccentMat
+      );
+      sinkWater.position.set(sinkX, hM + 0.007, 0.02);
+      kcGroup.add(sinkWater);
+
+      const faucetStem = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.014, 0.016, 0.18, 10),
+        metalMat
+      );
+      faucetStem.position.set(sinkX, hM + 0.09, -sinkD * 0.45);
+      kcGroup.add(faucetStem);
+
+      const faucetSpout = new THREE.Mesh(
+        new THREE.BoxGeometry(0.022, 0.02, 0.12),
+        metalMat
+      );
+      faucetSpout.position.set(sinkX, hM + 0.175, -sinkD * 0.45 + 0.05);
+      kcGroup.add(faucetSpout);
+
+      // Right induction cooktop + 2 burner rings
+      const hobW = Math.min(0.68, wM * 0.28);
+      const hobD = Math.min(0.42, dM * 0.64);
+      const hobX = wM * 0.24;
+      const hob = new THREE.Mesh(
+        new THREE.BoxGeometry(hobW, 0.014, hobD),
+        cooktopGlassMat
+      );
+      hob.position.set(hobX, hM + 0.007, 0.01);
+      kcGroup.add(hob);
+
+      const ringR = Math.min(0.09, hobW * 0.16);
+      const burnerGeo = new THREE.CylinderGeometry(ringR, ringR, 0.004, 18);
+      for (const bOff of [-hobW * 0.22, hobW * 0.22]) {
+        const burner = new THREE.Mesh(burnerGeo, metalMat);
+        burner.position.set(hobX + bOff, hM + 0.016, 0.01);
+        kcGroup.add(burner);
+      }
+
+      if (showWireframe) {
+        const outline = new THREE.LineSegments(
+          new THREE.EdgesGeometry(new THREE.BoxGeometry(wM, hM, dM), 20),
+          wallEdgeLineMat
+        );
+        outline.position.set(0, hM * 0.5, 0);
+        kcGroup.add(outline);
+      }
+
+      if (isSelected && customHex) {
+        const selOutline = new THREE.LineSegments(
+          new THREE.EdgesGeometry(new THREE.BoxGeometry(wM + 0.03, hM + 0.03, dM + 0.03)),
+          selectionEdgeMat
+        );
+        selOutline.position.set(0, hM * 0.5, 0);
+        kcGroup.add(selOutline);
+      }
+
+      roomGroup.add(kcGroup);
     } else {
       const cabGroup = new THREE.Group();
       const normalDir = pl.facingNormal;
@@ -872,7 +1643,7 @@ export function buildRoomSceneGroup(
 
       const body = new THREE.Mesh(
         new THREE.BoxGeometry(wM, bodyH, dM - 0.022),
-        isSelected ? selectedAccentMat : cabBodyMat
+        useSelectTint ? selectedAccentMat : customMat ?? cabBodyMat
       );
       body.position.set(0, plinthH + bodyH * 0.5, -0.011);
       body.castShadow = !isSoftwareGl;
@@ -881,7 +1652,7 @@ export function buildRoomSceneGroup(
 
       const topCap = new THREE.Mesh(
         new THREE.BoxGeometry(wM + 0.008, topTrimH, dM + 0.006),
-        isSelected ? selectedAccentMat : cabDoorMat
+        useSelectTint ? selectedAccentMat : customDarkMat ?? cabDoorMat
       );
       topCap.position.set(0, plinthH + bodyH + topTrimH * 0.5, 0);
       topCap.castShadow = !isSoftwareGl;
@@ -895,7 +1666,7 @@ export function buildRoomSceneGroup(
           -wM * 0.5 + doorGap + singleDoorW * 0.5 + dIdx * (singleDoorW + doorGap);
         const doorPanel = new THREE.Mesh(
           new THREE.BoxGeometry(singleDoorW, bodyH - 0.016, 0.02),
-          isSelected ? selectedAccentMat : cabDoorMat
+          useSelectTint ? selectedAccentMat : customDarkMat ?? cabDoorMat
         );
         doorPanel.position.set(dx, plinthH + bodyH * 0.5, dM * 0.5 - 0.01);
         cabGroup.add(doorPanel);
@@ -926,6 +1697,15 @@ export function buildRoomSceneGroup(
         const outline = new THREE.LineSegments(outlineGeo, wallEdgeLineMat);
         outline.position.set(0, hM * 0.5, 0);
         cabGroup.add(outline);
+      }
+
+      if (isSelected && customHex) {
+        const selOutline = new THREE.LineSegments(
+          new THREE.EdgesGeometry(new THREE.BoxGeometry(wM + 0.03, hM + 0.03, dM + 0.03)),
+          selectionEdgeMat
+        );
+        selOutline.position.set(0, hM * 0.5, 0);
+        cabGroup.add(selOutline);
       }
 
       roomGroup.add(cabGroup);

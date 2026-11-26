@@ -61,16 +61,16 @@ const FLOORPLAN_PROMPT = `你是一位專業的建築與室內設計製圖分析
    - 範例推算：若上側主牆從左上角 \`(0,0)\` 起算，左側窗寬 \`200\` 後接一小段牆 \`14\`，接著有一條垂直向下的隔間牆長 \`160\`，則該隔間牆為 \`startXCm = 214, startYCm = 0, lengthCm = 160, angleDeg = 90\`；若其底端再向右延伸 \`12.5 + 90 + 56 = 158.5\` cm 接到右側外牆，則第二段隔間牆為 \`startXCm = 214, startYCm = 160, lengthCm = 158.5, angleDeg = 0\`。
 
 4. **空間元件與家具 (elements)**：
-   - 辨識草圖上標註的所有「門 (door)」、「窗戶 / 窗 (window)」、「櫃 / 系統櫃 / 衣櫃 (cabinet)」，以及家具：「桌子 (table)」、「椅子 (chair)」、「病床 (bed)」。
+   - 辨識草圖上標註的所有「門 (door)」、「窗戶 / 窗 (window)」、「櫃 / 系統櫃 / 衣櫃 (cabinet)」、「吊櫃 (wall_cabinet)」、「廚房一字櫥櫃 / 廚具台 (kitchen_counter)」，以及家具與衛浴設備：「桌子 (table)」、「圓桌 (round_table)」、「椅子 (chair)」、「沙發 (sofa)」、「病床 (bed)」、「病床隔簾(L型) (bed_curtain)」、「馬桶 (toilet)」、「小便斗 (urinal)」、「蓮蓬頭 (shower)」、「洗手台 (sink)」。
    - **仔細讀取窗戶與門的手寫標註**：
      - 窗戶常見格式如「窗 寬200×高160 離地90」→ \`widthCm = 200, heightCm = 160, elevationCm = 90\`；「窗 寬123×高73 離地172」→ \`widthCm = 123, heightCm = 73, elevationCm = 172\`。若有寫出明確數字，請**務必採用手寫數字**，不可被預設值覆蓋。
      - 門常見格式如「門 120」→ \`widthCm = 120, heightCm = 210, elevationCm = 0\`；若門兩側標有距離如 \`12.5\` 與 \`56\`，則 \`offsetCm = 12.5\`（距該牆段起點之距離）。
    - \`placement\` 與依附牆壁：
-     - 貼牆或嵌在牆上的門、窗、靠牆櫃、靠牆病床設為 \`"wall"\`：
+     - 貼牆或嵌在牆上的門、窗、靠牆櫃、吊櫃、廚房一字櫥櫃、馬桶、小便斗、蓮蓬頭、洗手台、靠牆病床設為 \`"wall"\`：
        - 若該元件位於**外圍牆壁 (\`edges\`)** 上：設 \`wallTarget = "outer"\`、\`edgeIndex\`（\`edges\` 的 0-based 索引）與 \`offsetCm\`（從該牆段「順時針起點」算起的公分數；注意由右向左的底牆 \`angleDeg=180\`，起點在右側，若從左側起算距離需換算）。
        - 若該元件位於**室內隔間牆 (\`interiorWalls\`)** 上（例如小房間牆上的門）：設 \`wallTarget = "interior"\`、\`interiorWallIndex\`（\`interiorWalls\` 的 0-based 索引）與 \`offsetCm\`（從該隔間牆 \`(startXCm, startYCm)\` 算起的公分數）。
-     - 若元件位於空間中央或未貼牆（如桌子、椅子、獨立病床），設為 \`"free"\`，並提供中心座標 \`xCm\`、\`yCm\` 與旋轉角度 \`rotationDeg\`（0 = 朝下/+Y、90 = 朝左/-X、180 = 朝上/-Y、270 = 朝右/+X）。
-   - 未標註尺寸時之預設：門寬 90/高 210、窗寬 140/高 140/離地 90、櫃深 60/高 210、桌 120×60×75、椅 48×48×85、病床 100×215×60。
+     - 若元件位於空間中央或未貼牆（如桌子、圓桌、椅子、沙發、獨立病床、L型病床隔簾），設為 \`"free"\`，並提供中心座標 \`xCm\`、\`yCm\` 與旋轉角度 \`rotationDeg\`（0 = 朝下/+Y、90 = 朝左/-X、180 = 朝上/-Y、270 = 朝右/+X）。
+   - 未標註尺寸時之預設：門寬 90/高 210、窗寬 140/高 140/離地 90、櫃深 60/高 210、吊櫃 100×35×70 離地 145、廚房一字櫥櫃 240×65×85、桌 120×60×75、圓桌 110×110×75、椅 48×48×85、沙發 210×88×82、病床 100×215×60、病床隔簾 160×240×210 離地 40、馬桶 40×70×75、小便斗 36×36×75 離地 50、蓮蓬頭 30×35×130 離地 80、洗手台 60×48×85。
 
 5. **分析備註 (analysisNotes)**：
    - 輸出 JSON 前請先自我核對一次：(a) 上方總寬與下方總寬是否大致相符；(b) 左側總高與右側總高是否大致相符；(c) 隔間牆端點是否確實連接外牆或另一段隔間牆；(d) 門窗 \`offsetCm\` 是否符合順時針／隔間牆起點方向。
@@ -178,7 +178,8 @@ async function callFloorplanModel(
               properties: {
                 kind: {
                   type: Type.STRING,
-                  description: 'Must be one of: door, cabinet, window, table, chair, bed',
+                  description:
+                    'Must be one of: door, window, cabinet, wall_cabinet, kitchen_counter, table, round_table, chair, sofa, bed, bed_curtain, toilet, urinal, shower, sink',
                 },
                 name: { type: Type.STRING },
                 placement: {
@@ -382,7 +383,23 @@ async function createServer() {
         Math.max(120, Math.round(Number(parsed.ceilingHeightCm) || 250))
       );
 
-      const allowedKinds = new Set(['door', 'cabinet', 'window', 'table', 'chair', 'bed']);
+      const allowedKinds = new Set([
+        'door',
+        'window',
+        'cabinet',
+        'wall_cabinet',
+        'kitchen_counter',
+        'table',
+        'round_table',
+        'chair',
+        'sofa',
+        'bed',
+        'bed_curtain',
+        'toilet',
+        'urinal',
+        'shower',
+        'sink',
+      ]);
       const allowedSwings = new Set([
         'inward-left',
         'inward-right',
@@ -399,10 +416,19 @@ async function createServer() {
       > = {
         door: { name: '門', w: 90, d: 12, h: 210, elev: 0 },
         cabinet: { name: '櫃體', w: 100, d: 60, h: 210, elev: 0 },
+        wall_cabinet: { name: '吊櫃', w: 100, d: 35, h: 70, elev: 145 },
+        kitchen_counter: { name: '廚房一字櫥櫃', w: 240, d: 65, h: 85, elev: 0 },
         window: { name: '窗戶', w: 140, d: 12, h: 140, elev: 90 },
         table: { name: '桌子', w: 120, d: 60, h: 75, elev: 0 },
+        round_table: { name: '圓桌', w: 110, d: 110, h: 75, elev: 0 },
         chair: { name: '椅子', w: 48, d: 48, h: 85, elev: 0 },
+        sofa: { name: '沙發', w: 210, d: 88, h: 82, elev: 0 },
         bed: { name: '病床', w: 100, d: 215, h: 60, elev: 0 },
+        bed_curtain: { name: '病床隔簾(L型)', w: 160, d: 240, h: 210, elev: 40 },
+        toilet: { name: '馬桶', w: 40, d: 70, h: 75, elev: 0 },
+        urinal: { name: '小便斗', w: 36, d: 36, h: 75, elev: 50 },
+        shower: { name: '蓮蓬頭', w: 30, d: 35, h: 130, elev: 80 },
+        sink: { name: '洗手台', w: 60, d: 48, h: 85, elev: 0 },
       };
 
       const rawElements = Array.isArray(parsed.elements) ? parsed.elements : [];

@@ -14,24 +14,34 @@ import {
   Scissors,
   Copy,
   Eye,
+  Magnet,
 } from 'lucide-react';
 import type {
   FloorplanProject,
   Point2D,
   SectionLine,
+  SnapGuideLine,
   SolvedFloorplan,
   SolvedElementPlacement,
   SolvedWallSegment,
 } from '../types/floorplan';
 import {
   computeElementWallClearances,
+  computeMagneticSnapPosition,
+  computeWallDragResult,
+  darkenHexColor,
+  DEFAULT_FLOOR_2D_COLOR,
+  DEFAULT_INTERIOR_WALL_CORE_2D_COLOR,
+  DEFAULT_WALL_CORE_2D_COLOR,
   formatDimension,
+  getContrastTextColor,
   getDoorSwingLabel,
   getNextSectionLabel,
   getSectionBasis,
   normalizeAngleDeg,
   parseDoorSwing,
   rotateElementAngle,
+  sanitizeHexColor,
 } from '../utils/floorplanGeometry';
 
 export interface Floorplan2DHandle {
@@ -48,12 +58,16 @@ interface Floorplan2DCanvasProps {
   selectedElementId: string | null;
   selectedSectionId?: string | null;
   sectionDrawMode?: boolean;
+  magneticSnapEnabled?: boolean;
   readOnly?: boolean;
   onSetSectionDrawMode?: (active: boolean) => void;
+  onToggleMagneticSnap?: () => void;
   onSelectEdge: (edgeId: string | null) => void;
   onSelectElement: (elementId: string | null) => void;
   onSelectSection?: (sectionId: string | null) => void;
   onMoveElement?: (elementId: string, xCm: number, yCm: number) => void;
+  onSlideWallElement?: (elementId: string, offsetCm: number) => void;
+  onDetachWallElement?: (elementId: string, xCm: number, yCm: number, rotationDeg: number) => void;
   onRotateElement?: (elementId: string, rotationDeg: number) => void;
   onFlipDoor?: (elementId: string, axis: 'hinge' | 'side' | 'type') => void;
   onBeginElementInteraction?: () => void;
@@ -105,12 +119,16 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
       selectedElementId,
       selectedSectionId = null,
       sectionDrawMode = false,
+      magneticSnapEnabled,
       readOnly = false,
       onSetSectionDrawMode,
+      onToggleMagneticSnap,
       onSelectEdge,
       onSelectElement,
       onSelectSection,
       onMoveElement,
+      onSlideWallElement,
+      onDetachWallElement,
       onRotateElement,
       onFlipDoor,
       onBeginElementInteraction,
@@ -134,6 +152,12 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
     const [pan, setPan] = useState<Point2D>({ x: 0, y: 0 });
     const [showGrid, setShowGrid] = useState(true);
     const [showDimensions, setShowDimensions] = useState(true);
+    const [internalSnapEnabled, setInternalSnapEnabled] = useState(true);
+    const effectiveSnapEnabled = onToggleMagneticSnap
+      ? (magneticSnapEnabled ?? true)
+      : internalSnapEnabled;
+    const handleToggleSnap = onToggleMagneticSnap ?? (() => setInternalSnapEnabled((v) => !v));
+    const [snapGuides, setSnapGuides] = useState<SnapGuideLine[]>([]);
     const [isDragging, setIsDragging] = useState(false);
     const [draftSection, setDraftSection] = useState<{
       startX: number;
@@ -150,6 +174,16 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
       startClientY: number;
       origXCm: number;
       origYCm: number;
+      mode: 'free' | 'wall';
+      origOffsetCm: number;
+      edgeTangent?: Point2D;
+      edgeInward?: Point2D;
+      facingNormal?: Point2D;
+      edgeLenCm?: number;
+      widthCm: number;
+      depthCm: number;
+      rotationDeg: number;
+      isOpening: boolean;
     } | null>(null);
     const rotatingElRef = useRef<{
       id: string;
@@ -221,12 +255,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
       }
 
       for (const pl of placements) {
-        if (
-          pl.element.kind === 'cabinet' ||
-          pl.element.kind === 'table' ||
-          pl.element.kind === 'chair' ||
-          pl.element.kind === 'bed'
-        ) {
+        if (pl.element.kind !== 'door' && pl.element.kind !== 'window') {
           const r = Math.max(pl.clampedWidthCm, pl.element.depthCm) * 0.52;
           placedBoxes.push({
             x: pl.boxCenter.x - r,
@@ -481,15 +510,51 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
         const scaleY = viewMetrics.vbH / Math.max(1, rect.height);
         const scale = Math.max(scaleX, scaleY);
 
-        if (draggingElRef.current && onMoveElement) {
+        if (draggingElRef.current) {
           const drag = draggingElRef.current;
           const dxCm = (e.clientX - drag.startClientX) * scale;
           const dyCm = (e.clientY - drag.startClientY) * scale;
-          onMoveElement(
-            drag.id,
-            Math.round(drag.origXCm + dxCm),
-            Math.round(drag.origYCm + dyCm)
-          );
+          const snapActive = effectiveSnapEnabled && !e.shiftKey && !e.altKey;
+          if (drag.mode === 'free') {
+            const snapRes = computeMagneticSnapPosition({
+              elementId: drag.id,
+              candidateXCm: drag.origXCm + dxCm,
+              candidateYCm: drag.origYCm + dyCm,
+              widthCm: drag.widthCm,
+              depthCm: drag.depthCm,
+              rotationDeg: drag.rotationDeg,
+              wallThicknessCm: project.wallThicknessCm,
+              solved,
+              placements,
+              enabled: snapActive,
+            });
+            setSnapGuides(snapRes.guides);
+            onMoveElement?.(drag.id, snapRes.xCm, snapRes.yCm);
+          } else if (drag.edgeTangent && drag.edgeInward && drag.facingNormal) {
+            const res = computeWallDragResult({
+              dxCm,
+              dyCm,
+              origOffsetCm: drag.origOffsetCm,
+              origBoxXCm: drag.origXCm,
+              origBoxYCm: drag.origYCm,
+              edgeLengthCm: drag.edgeLenCm ?? 0,
+              elementWidthCm: drag.widthCm,
+              tangent: drag.edgeTangent,
+              inwardNormal: drag.edgeInward,
+              facingNormal: drag.facingNormal,
+              isOpening: drag.isOpening,
+              snapEnabled: snapActive,
+            });
+            if (res.mode === 'free' && onDetachWallElement) {
+              drag.mode = 'free';
+              drag.rotationDeg = res.rotationDeg;
+              setSnapGuides([]);
+              onDetachWallElement(drag.id, res.xCm, res.yCm, res.rotationDeg);
+            } else if (res.mode === 'wall' && onSlideWallElement) {
+              setSnapGuides([]);
+              onSlideWallElement(drag.id, res.offsetCm);
+            }
+          }
           return;
         }
 
@@ -515,9 +580,15 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
         viewMetrics.vbW,
         viewMetrics.vbH,
         project.sectionLines,
+        project.wallThicknessCm,
+        solved,
+        placements,
+        effectiveSnapEnabled,
         clientToWorldCm,
         snapSectionEndpoint,
         onMoveElement,
+        onSlideWallElement,
+        onDetachWallElement,
         onRotateElement,
         onUpdateSectionLine,
       ]
@@ -569,6 +640,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
       }
 
       setIsDragging(false);
+      setSnapGuides([]);
       dragStartRef.current = null;
       panMovedRef.current = false;
       draggingElRef.current = null;
@@ -758,7 +830,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
           {solved.polygonPoints.length >= 3 && (
             <polygon
               points={polygonPointsStr}
-              fill="#f8fafc"
+              fill={sanitizeHexColor(project.floorColor) || DEFAULT_FLOOR_2D_COLOR}
               stroke="none"
             />
           )}
@@ -767,6 +839,8 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
           {solved.solvedEdges.map((se) => {
             if (!se.edge.hasWall) return null;
             const isSelected = selectedEdgeId === se.edge.id;
+            const wallCoreColor =
+              sanitizeHexColor(project.wallColor) || DEFAULT_WALL_CORE_2D_COLOR;
             return (
               <g
                 key={`wall-${se.edge.id}`}
@@ -804,7 +878,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                   y1={se.start.y}
                   x2={se.end.x}
                   y2={se.end.y}
-                  stroke={isSelected ? '#dbeafe' : '#cbd5e1'}
+                  stroke={isSelected ? '#dbeafe' : wallCoreColor}
                   strokeWidth={Math.max(2, wallStroke - 4)}
                   strokeLinecap="square"
                 />
@@ -832,6 +906,8 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
           {solved.solvedInteriorWalls.map((iw) => {
             const isSelected = selectedEdgeId === iw.id;
             const innerWallStroke = Math.max(5, wallStroke * 0.85);
+            const interiorCoreColor =
+              sanitizeHexColor(project.wallColor) || DEFAULT_INTERIOR_WALL_CORE_2D_COLOR;
             return (
               <g
                 key={`iw-${iw.id}`}
@@ -868,7 +944,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                       y1={iw.start.y}
                       x2={iw.end.x}
                       y2={iw.end.y}
-                      stroke={isSelected ? '#dbeafe' : '#e2e8f0'}
+                      stroke={isSelected ? '#dbeafe' : interiorCoreColor}
                       strokeWidth={Math.max(2, innerWallStroke - 4)}
                       strokeLinecap="square"
                     />
@@ -939,17 +1015,39 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
           ))}
 
           {/* Elements: Cabinets, Furniture (Table/Chair/Bed), Windows, Doors */}
-          {placements.map((pl) => {
+          {[...placements]
+            .sort((a, b) => {
+              const aTop =
+                a.element.id === selectedElementId &&
+                a.element.kind !== 'door' &&
+                a.element.kind !== 'window'
+                  ? 1
+                  : 0;
+              const bTop =
+                b.element.id === selectedElementId &&
+                b.element.kind !== 'door' &&
+                b.element.kind !== 'window'
+                  ? 1
+                  : 0;
+              return aTop - bTop;
+            })
+            .map((pl) => {
             const { element, startPoint, endPoint, center, boxCenter, edge, tangent } = pl;
             const isSelected = selectedElementId === element.id;
             const isFree = pl.placementMode === 'free';
             const normalDir = pl.facingNormal;
 
+            const isOpening = element.kind === 'door' || element.kind === 'window';
+            const customColor = sanitizeHexColor(element.color);
+            const customTextColor = customColor ? getContrastTextColor(customColor) : null;
+            const customStrokeColor = customColor ? darkenHexColor(customColor, 0.58) : null;
+
             const startFreeDrag = (e: React.PointerEvent<SVGGElement>) => {
               e.stopPropagation();
               onSelectElement(element.id);
               onSelectEdge(null);
-              if (!readOnly && isFree && onMoveElement && e.button === 0) {
+              if (readOnly || e.button !== 0) return;
+              if (isFree && onMoveElement) {
                 onBeginElementInteraction?.();
                 suppressNextSvgClickRef.current = true;
                 draggingElRef.current = {
@@ -958,6 +1056,33 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                   startClientY: e.clientY,
                   origXCm: boxCenter.x,
                   origYCm: boxCenter.y,
+                  mode: 'free',
+                  origOffsetCm: pl.clampedOffsetCm,
+                  widthCm: pl.clampedWidthCm,
+                  depthCm: element.depthCm,
+                  rotationDeg: pl.angleDeg,
+                  isOpening,
+                };
+                e.currentTarget.setPointerCapture?.(e.pointerId);
+              } else if (!isFree && edge && (onSlideWallElement || (!isOpening && onDetachWallElement))) {
+                onBeginElementInteraction?.();
+                suppressNextSvgClickRef.current = true;
+                draggingElRef.current = {
+                  id: element.id,
+                  startClientX: e.clientX,
+                  startClientY: e.clientY,
+                  origXCm: boxCenter.x,
+                  origYCm: boxCenter.y,
+                  mode: 'wall',
+                  origOffsetCm: pl.clampedOffsetCm,
+                  edgeTangent: edge.tangent,
+                  edgeInward: edge.inwardNormal,
+                  facingNormal: normalDir,
+                  edgeLenCm: edge.lengthCm,
+                  widthCm: pl.clampedWidthCm,
+                  depthCm: element.depthCm,
+                  rotationDeg: pl.angleDeg,
+                  isOpening,
                 };
                 e.currentTarget.setPointerCapture?.(e.pointerId);
               }
@@ -1004,13 +1129,16 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
               const halfD = element.depthCm * 0.5;
               const [c1, c2, c3, c4] = buildRectCorners(boxCenter.x, boxCenter.y, halfW, halfD);
               const pts = toPts([c1, c2, c3, c4]);
+              const fillCol = customColor || '#fef3c7';
+              const strokeCol = isSelected ? '#1d4ed8' : customStrokeColor || '#b45309';
+              const txtCol = customTextColor || '#78350f';
 
               return (
                 <g
                   key={element.id}
                   data-interactive="true"
                   data-element-id={element.id}
-                  className={isFree ? 'cursor-move' : 'cursor-pointer'}
+                  className={!readOnly ? 'cursor-move' : 'cursor-pointer'}
                   onPointerDown={startFreeDrag}
                   onDoubleClick={handleElementDoubleClick}
                   onClick={(e) => {
@@ -1021,17 +1149,17 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                 >
                   <polygon
                     points={pts}
-                    fill="#fef3c7"
-                    stroke={isSelected ? '#1d4ed8' : '#b45309'}
+                    fill={fillCol}
+                    stroke={strokeCol}
                     strokeWidth={(isSelected ? 2.5 : 1.8) * s}
                   />
-                  <polygon points={pts} fill="url(#cabinet-hatch)" />
+                  {!customColor && <polygon points={pts} fill="url(#cabinet-hatch)" />}
                   <line
                     x1={c1.x}
                     y1={c1.y}
                     x2={c3.x}
                     y2={c3.y}
-                    stroke="#b45309"
+                    stroke={customStrokeColor || '#b45309'}
                     strokeOpacity="0.4"
                     strokeWidth={1 * s}
                   />
@@ -1040,7 +1168,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                     y1={c2.y}
                     x2={c4.x}
                     y2={c4.y}
-                    stroke="#b45309"
+                    stroke={customStrokeColor || '#b45309'}
                     strokeOpacity="0.4"
                     strokeWidth={1 * s}
                   />
@@ -1049,7 +1177,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                     y={boxCenter.y}
                     textAnchor="middle"
                     dominantBaseline="central"
-                    fill="#78350f"
+                    fill={txtCol}
                     fontSize={10 * s}
                     fontWeight="600"
                     className="font-sans pointer-events-none"
@@ -1061,11 +1189,134 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                     y={boxCenter.y + 12 * s}
                     textAnchor="middle"
                     dominantBaseline="central"
-                    fill="#92400e"
+                    fill={customTextColor || '#92400e'}
                     fontSize={8.5 * s}
                     className="font-mono tabular-nums pointer-events-none"
                   >
                     {Math.round(element.depthCm)}×{Math.round(pl.clampedWidthCm)}
+                  </text>
+                </g>
+              );
+            }
+
+            if (element.kind === 'kitchen_counter') {
+              const halfW = pl.clampedWidthCm * 0.5;
+              const halfD = element.depthCm * 0.5;
+              const fillCol = customColor || '#f5efe6';
+              const strokeCol = isSelected ? '#1d4ed8' : customStrokeColor || '#92400e';
+              const txtCol = customTextColor || '#451a03';
+              const sinkW = Math.min(pl.clampedWidthCm * 0.28, 56);
+              const sinkD = element.depthCm * 0.62;
+              const sinkCx = -halfW + Math.max(sinkW * 0.68, pl.clampedWidthCm * 0.22);
+              const stoveW = Math.min(pl.clampedWidthCm * 0.3, 64);
+              const stoveD = element.depthCm * 0.68;
+              const stoveCx = halfW - Math.max(stoveW * 0.68, pl.clampedWidthCm * 0.22);
+
+              return (
+                <g
+                  key={element.id}
+                  data-interactive="true"
+                  data-element-id={element.id}
+                  className={!readOnly ? 'cursor-move' : 'cursor-pointer'}
+                  onPointerDown={startFreeDrag}
+                  onDoubleClick={handleElementDoubleClick}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectElement(element.id);
+                    onSelectEdge(null);
+                  }}
+                >
+                  <g
+                    transform={`matrix(${tangent.x} ${tangent.y} ${normalDir.x} ${normalDir.y} ${boxCenter.x} ${boxCenter.y})`}
+                  >
+                    {/* Countertop body */}
+                    <rect
+                      x={-halfW}
+                      y={-halfD}
+                      width={pl.clampedWidthCm}
+                      height={element.depthCm}
+                      rx={2.5 * s}
+                      fill={fillCol}
+                      stroke={strokeCol}
+                      strokeWidth={(isSelected ? 2.5 : 1.8) * s}
+                    />
+                    {/* Back wall lip */}
+                    <line
+                      x1={-halfW}
+                      y1={-halfD + 4}
+                      x2={halfW}
+                      y2={-halfD + 4}
+                      stroke={customStrokeColor || '#b45309'}
+                      strokeOpacity="0.4"
+                      strokeWidth={1.2 * s}
+                    />
+                    {/* Left stainless sink basin */}
+                    <rect
+                      x={sinkCx - sinkW * 0.5}
+                      y={-sinkD * 0.45}
+                      width={sinkW}
+                      height={sinkD}
+                      rx={4 * s}
+                      fill="#e2e8f0"
+                      stroke="#475569"
+                      strokeWidth={1.3 * s}
+                    />
+                    <circle
+                      cx={sinkCx}
+                      cy={0}
+                      r={Math.min(3.5, sinkW * 0.08)}
+                      fill="#94a3b8"
+                      stroke="#334155"
+                      strokeWidth={0.9 * s}
+                    />
+                    <line
+                      x1={sinkCx}
+                      y1={-halfD + 4}
+                      x2={sinkCx}
+                      y2={-sinkD * 0.15}
+                      stroke="#1e293b"
+                      strokeWidth={2.2 * s}
+                      strokeLinecap="round"
+                    />
+                    {/* Right ceramic induction cooktop */}
+                    <rect
+                      x={stoveCx - stoveW * 0.5}
+                      y={-stoveD * 0.46}
+                      width={stoveW}
+                      height={stoveD}
+                      rx={3 * s}
+                      fill="#1e293b"
+                      stroke="#475569"
+                      strokeWidth={1.2 * s}
+                    />
+                    <circle
+                      cx={stoveCx - stoveW * 0.22}
+                      cy={0}
+                      r={Math.min(11, stoveD * 0.28)}
+                      fill="none"
+                      stroke="#cbd5e1"
+                      strokeWidth={1.3 * s}
+                    />
+                    <circle
+                      cx={stoveCx + stoveW * 0.22}
+                      cy={0}
+                      r={Math.min(9.5, stoveD * 0.24)}
+                      fill="none"
+                      stroke="#cbd5e1"
+                      strokeWidth={1.3 * s}
+                    />
+                  </g>
+                  <text
+                    x={boxCenter.x}
+                    y={boxCenter.y + normalDir.y * (halfD + 10 * s) + tangent.x * 0}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fill={txtCol}
+                    fontSize={9 * s}
+                    fontWeight="600"
+                    className="font-sans pointer-events-none"
+                  >
+                    {element.name} ({Math.round(pl.clampedWidthCm)}×{Math.round(element.depthCm)})
                   </text>
                 </g>
               );
@@ -1083,13 +1334,16 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                   Math.max(4, halfD - 5 * s)
                 )
               );
+              const fillCol = customColor || '#fef9c3';
+              const strokeCol = isSelected ? '#1d4ed8' : customStrokeColor || '#a16207';
+              const txtCol = customTextColor || '#713f12';
 
               return (
                 <g
                   key={element.id}
                   data-interactive="true"
                   data-element-id={element.id}
-                  className={isFree ? 'cursor-move' : 'cursor-pointer'}
+                  className={!readOnly ? 'cursor-move' : 'cursor-pointer'}
                   onPointerDown={startFreeDrag}
                   onDoubleClick={handleElementDoubleClick}
                   onClick={(e) => {
@@ -1100,14 +1354,14 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                 >
                   <polygon
                     points={outerPts}
-                    fill="#fef9c3"
-                    stroke={isSelected ? '#1d4ed8' : '#a16207'}
+                    fill={fillCol}
+                    stroke={strokeCol}
                     strokeWidth={(isSelected ? 2.5 : 1.8) * s}
                   />
                   <polygon
                     points={innerPts}
                     fill="none"
-                    stroke="#ca8a04"
+                    stroke={customStrokeColor || '#ca8a04'}
                     strokeOpacity="0.45"
                     strokeWidth={1 * s}
                   />
@@ -1116,7 +1370,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                     y={boxCenter.y - 4 * s}
                     textAnchor="middle"
                     dominantBaseline="central"
-                    fill="#713f12"
+                    fill={txtCol}
                     fontSize={10 * s}
                     fontWeight="600"
                     className="font-sans pointer-events-none"
@@ -1128,8 +1382,209 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                     y={boxCenter.y + 9 * s}
                     textAnchor="middle"
                     dominantBaseline="central"
-                    fill="#854d0e"
+                    fill={customTextColor || '#854d0e'}
                     fontSize={8.5 * s}
+                    className="font-mono tabular-nums pointer-events-none"
+                  >
+                    {Math.round(pl.clampedWidthCm)}×{Math.round(element.depthCm)}
+                  </text>
+                </g>
+              );
+            }
+
+            if (element.kind === 'round_table') {
+              const halfW = pl.clampedWidthCm * 0.5;
+              const halfD = element.depthCm * 0.5;
+              const fillCol = customColor || '#fef3c7';
+              const strokeCol = isSelected ? '#1d4ed8' : customStrokeColor || '#b45309';
+              const txtCol = customTextColor || '#78350f';
+              const sizeLabel =
+                Math.abs(pl.clampedWidthCm - element.depthCm) <= 2
+                  ? `Ø${Math.round(pl.clampedWidthCm)}`
+                  : `${Math.round(pl.clampedWidthCm)}×${Math.round(element.depthCm)}`;
+
+              return (
+                <g
+                  key={element.id}
+                  data-interactive="true"
+                  data-element-id={element.id}
+                  className={!readOnly ? 'cursor-move' : 'cursor-pointer'}
+                  onPointerDown={startFreeDrag}
+                  onDoubleClick={handleElementDoubleClick}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectElement(element.id);
+                    onSelectEdge(null);
+                  }}
+                >
+                  <g
+                    transform={`matrix(${tangent.x} ${tangent.y} ${normalDir.x} ${normalDir.y} ${boxCenter.x} ${boxCenter.y})`}
+                  >
+                    <ellipse
+                      cx={0}
+                      cy={0}
+                      rx={halfW}
+                      ry={halfD}
+                      fill={fillCol}
+                      stroke={strokeCol}
+                      strokeWidth={(isSelected ? 2.6 : 1.9) * s}
+                    />
+                    <ellipse
+                      cx={0}
+                      cy={0}
+                      rx={Math.max(4, halfW * 0.85)}
+                      ry={Math.max(4, halfD * 0.85)}
+                      fill="none"
+                      stroke={customStrokeColor || '#d97706'}
+                      strokeOpacity="0.4"
+                      strokeWidth={1 * s}
+                    />
+                    <circle
+                      cx={0}
+                      cy={0}
+                      r={Math.min(halfW, halfD) * 0.16}
+                      fill="none"
+                      stroke={customStrokeColor || '#92400e'}
+                      strokeOpacity="0.35"
+                      strokeWidth={1.1 * s}
+                      strokeDasharray={`${3 * s} ${2 * s}`}
+                    />
+                  </g>
+                  <text
+                    x={boxCenter.x}
+                    y={boxCenter.y - 4 * s}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fill={txtCol}
+                    fontSize={10 * s}
+                    fontWeight="600"
+                    className="font-sans pointer-events-none"
+                  >
+                    {element.name}
+                  </text>
+                  <text
+                    x={boxCenter.x}
+                    y={boxCenter.y + 9 * s}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fill={customTextColor || '#92400e'}
+                    fontSize={8.5 * s}
+                    className="font-mono tabular-nums pointer-events-none"
+                  >
+                    {sizeLabel}
+                  </text>
+                </g>
+              );
+            }
+
+            if (element.kind === 'sofa') {
+              const halfW = pl.clampedWidthCm * 0.5;
+              const halfD = element.depthCm * 0.5;
+              const fillCol = customColor || '#ede9fe';
+              const strokeCol = isSelected ? '#1d4ed8' : customStrokeColor || '#6d28d9';
+              const backFill = customColor ? darkenHexColor(customColor, 0.82) : '#ddd6fe';
+              const txtCol = customTextColor || '#4c1d95';
+              const armW = Math.min(18, pl.clampedWidthCm * 0.12);
+              const backD = Math.min(22, element.depthCm * 0.26);
+              const seatW = Math.max(12, pl.clampedWidthCm - armW * 2);
+              const cushionCount = pl.clampedWidthCm >= 170 ? 3 : 2;
+
+              return (
+                <g
+                  key={element.id}
+                  data-interactive="true"
+                  data-element-id={element.id}
+                  className={!readOnly ? 'cursor-move' : 'cursor-pointer'}
+                  onPointerDown={startFreeDrag}
+                  onDoubleClick={handleElementDoubleClick}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectElement(element.id);
+                    onSelectEdge(null);
+                  }}
+                >
+                  <g
+                    transform={`matrix(${tangent.x} ${tangent.y} ${normalDir.x} ${normalDir.y} ${boxCenter.x} ${boxCenter.y})`}
+                  >
+                    {/* Main frame */}
+                    <rect
+                      x={-halfW}
+                      y={-halfD}
+                      width={pl.clampedWidthCm}
+                      height={element.depthCm}
+                      rx={5 * s}
+                      fill={fillCol}
+                      stroke={strokeCol}
+                      strokeWidth={(isSelected ? 2.6 : 1.8) * s}
+                    />
+                    {/* Backrest */}
+                    <rect
+                      x={-halfW}
+                      y={-halfD}
+                      width={pl.clampedWidthCm}
+                      height={backD}
+                      rx={4 * s}
+                      fill={backFill}
+                      stroke={strokeCol}
+                      strokeWidth={1.3 * s}
+                    />
+                    {/* Left & right armrests */}
+                    <rect
+                      x={-halfW}
+                      y={-halfD}
+                      width={armW}
+                      height={element.depthCm}
+                      rx={3.5 * s}
+                      fill={backFill}
+                      stroke={strokeCol}
+                      strokeWidth={1.3 * s}
+                    />
+                    <rect
+                      x={halfW - armW}
+                      y={-halfD}
+                      width={armW}
+                      height={element.depthCm}
+                      rx={3.5 * s}
+                      fill={backFill}
+                      stroke={strokeCol}
+                      strokeWidth={1.3 * s}
+                    />
+                    {/* Seat cushion seam dividers */}
+                    {Array.from({ length: cushionCount - 1 }, (_, idx) => {
+                      const sx = -seatW * 0.5 + ((idx + 1) * seatW) / cushionCount;
+                      return (
+                        <line
+                          key={idx}
+                          x1={sx}
+                          y1={-halfD + backD}
+                          x2={sx}
+                          y2={halfD - 2}
+                          stroke={strokeCol}
+                          strokeOpacity="0.45"
+                          strokeWidth={1.1 * s}
+                        />
+                      );
+                    })}
+                  </g>
+                  <text
+                    x={boxCenter.x + normalDir.x * (backD * 0.35)}
+                    y={boxCenter.y + normalDir.y * (backD * 0.35) - 4 * s}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fill={txtCol}
+                    fontSize={9.5 * s}
+                    fontWeight="600"
+                    className="font-sans pointer-events-none"
+                  >
+                    {element.name}
+                  </text>
+                  <text
+                    x={boxCenter.x + normalDir.x * (backD * 0.35)}
+                    y={boxCenter.y + normalDir.y * (backD * 0.35) + 8 * s}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fill={customTextColor || '#5b21b6'}
+                    fontSize={8 * s}
                     className="font-mono tabular-nums pointer-events-none"
                   >
                     {Math.round(pl.clampedWidthCm)}×{Math.round(element.depthCm)}
@@ -1148,13 +1603,16 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
               const backPts = toPts(
                 buildRectCorners(backCenterX, backCenterY, halfW, backThick * 0.5)
               );
+              const fillCol = customColor || '#f1f5f9';
+              const strokeCol = isSelected ? '#1d4ed8' : customStrokeColor || '#475569';
+              const txtCol = customTextColor || '#1e293b';
 
               return (
                 <g
                   key={element.id}
                   data-interactive="true"
                   data-element-id={element.id}
-                  className={isFree ? 'cursor-move' : 'cursor-pointer'}
+                  className={!readOnly ? 'cursor-move' : 'cursor-pointer'}
                   onPointerDown={startFreeDrag}
                   onDoubleClick={handleElementDoubleClick}
                   onClick={(e) => {
@@ -1165,13 +1623,13 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                 >
                   <polygon
                     points={seatPts}
-                    fill="#f1f5f9"
-                    stroke={isSelected ? '#1d4ed8' : '#475569'}
+                    fill={fillCol}
+                    stroke={strokeCol}
                     strokeWidth={(isSelected ? 2.4 : 1.6) * s}
                   />
                   <polygon
                     points={backPts}
-                    fill={isSelected ? '#3b82f6' : '#334155'}
+                    fill={isSelected ? '#3b82f6' : customStrokeColor || '#334155'}
                     stroke={isSelected ? '#1d4ed8' : '#1e293b'}
                     strokeWidth={1.2 * s}
                   />
@@ -1180,7 +1638,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                     y={boxCenter.y + normalDir.y * (backThick * 0.35)}
                     textAnchor="middle"
                     dominantBaseline="central"
-                    fill="#1e293b"
+                    fill={txtCol}
                     fontSize={8.5 * s}
                     fontWeight="600"
                     className="font-sans pointer-events-none"
@@ -1265,7 +1723,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                   key={element.id}
                   data-interactive="true"
                   data-element-id={element.id}
-                  className={isFree ? 'cursor-move' : 'cursor-pointer'}
+                  className={!readOnly ? 'cursor-move' : 'cursor-pointer'}
                   onPointerDown={startFreeDrag}
                   onDoubleClick={handleElementDoubleClick}
                   onClick={(e) => {
@@ -1288,14 +1746,14 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                   <polygon
                     points={bedPts}
                     fill="#ffffff"
-                    stroke={isSelected ? '#1d4ed8' : '#0f766e'}
+                    stroke={isSelected ? '#1d4ed8' : customStrokeColor || '#0f766e'}
                     strokeWidth={(isSelected ? 2.6 : 1.9) * s}
                   />
                   <polygon
                     points={blanketPts}
-                    fill="#e0f2fe"
-                    stroke="#0284c7"
-                    strokeOpacity="0.45"
+                    fill={customColor || '#e0f2fe'}
+                    stroke={customStrokeColor || '#0284c7'}
+                    strokeOpacity="0.55"
                     strokeWidth={1.2 * s}
                   />
                   <polygon
@@ -1306,7 +1764,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                   />
                   <polygon
                     points={hbPts}
-                    fill={isSelected ? '#1d4ed8' : '#0f766e'}
+                    fill={isSelected ? '#1d4ed8' : customStrokeColor || '#0f766e'}
                   />
                   <line
                     x1={leftRailStart.x}
@@ -1331,7 +1789,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                     y={boxCenter.y + normalDir.y * (element.depthCm * 0.14) - 4 * s}
                     textAnchor="middle"
                     dominantBaseline="central"
-                    fill="#0f172a"
+                    fill={customTextColor || '#0f172a'}
                     fontSize={10 * s}
                     fontWeight="600"
                     className="font-sans pointer-events-none"
@@ -1343,7 +1801,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                     y={boxCenter.y + normalDir.y * (element.depthCm * 0.14) + 9 * s}
                     textAnchor="middle"
                     dominantBaseline="central"
-                    fill="#0369a1"
+                    fill={customTextColor || '#0369a1'}
                     fontSize={8.5 * s}
                     className="font-mono tabular-nums pointer-events-none"
                   >
@@ -1353,16 +1811,531 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
               );
             }
 
-            if (!edge) return null;
+            if (element.kind === 'wall_cabinet') {
+              const halfW = pl.clampedWidthCm * 0.5;
+              const halfD = element.depthCm * 0.5;
+              const [c1, c2, c3, c4] = buildRectCorners(boxCenter.x, boxCenter.y, halfW, halfD);
+              const pts = toPts([c1, c2, c3, c4]);
+              const fillCol = customColor || '#ffedd5';
+              const strokeCol = isSelected ? '#1d4ed8' : customStrokeColor || '#c2410c';
 
-            if (element.kind === 'window') {
-              const offsetSide = wallStroke * 0.3;
               return (
                 <g
                   key={element.id}
                   data-interactive="true"
                   data-element-id={element.id}
-                  className="cursor-pointer"
+                  className={!readOnly ? 'cursor-move' : 'cursor-pointer'}
+                  onPointerDown={startFreeDrag}
+                  onDoubleClick={handleElementDoubleClick}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectElement(element.id);
+                    onSelectEdge(null);
+                  }}
+                >
+                  <polygon
+                    points={pts}
+                    fill={fillCol}
+                    fillOpacity="0.58"
+                    stroke={strokeCol}
+                    strokeWidth={(isSelected ? 2.5 : 1.7) * s}
+                    strokeDasharray={`${5.5 * s} ${3.5 * s}`}
+                  />
+                  <line
+                    x1={c1.x}
+                    y1={c1.y}
+                    x2={c3.x}
+                    y2={c3.y}
+                    stroke={customStrokeColor || '#c2410c'}
+                    strokeOpacity="0.35"
+                    strokeWidth={1 * s}
+                    strokeDasharray={`${4 * s} ${3 * s}`}
+                  />
+                  <line
+                    x1={c2.x}
+                    y1={c2.y}
+                    x2={c4.x}
+                    y2={c4.y}
+                    stroke={customStrokeColor || '#c2410c'}
+                    strokeOpacity="0.35"
+                    strokeWidth={1 * s}
+                    strokeDasharray={`${4 * s} ${3 * s}`}
+                  />
+                  <text
+                    x={boxCenter.x}
+                    y={boxCenter.y - 4 * s}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fill={customTextColor || '#9a3412'}
+                    fontSize={9.5 * s}
+                    fontWeight="600"
+                    className="font-sans pointer-events-none"
+                  >
+                    {element.name}
+                  </text>
+                  <text
+                    x={boxCenter.x}
+                    y={boxCenter.y + 8 * s}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fill={customTextColor || '#c2410c'}
+                    fontSize={8 * s}
+                    className="font-mono tabular-nums pointer-events-none"
+                  >
+                    {Math.round(element.depthCm)}×{Math.round(pl.clampedWidthCm)}
+                  </text>
+                </g>
+              );
+            }
+
+            if (element.kind === 'toilet') {
+              const halfW = pl.clampedWidthCm * 0.5;
+              const halfD = element.depthCm * 0.5;
+              const tankD = Math.min(element.depthCm * 0.34, 24);
+              const bowlD = Math.max(12, element.depthCm - tankD);
+              const tankW = pl.clampedWidthCm * 0.94;
+              const bowlCy = -halfD + tankD + bowlD * 0.48;
+              const strokeCol = isSelected ? '#1d4ed8' : customStrokeColor || '#0284c7';
+              const bodyFill = customColor || '#ffffff';
+
+              return (
+                <g
+                  key={element.id}
+                  data-interactive="true"
+                  data-element-id={element.id}
+                  className={!readOnly ? 'cursor-move' : 'cursor-pointer'}
+                  onPointerDown={startFreeDrag}
+                  onDoubleClick={handleElementDoubleClick}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectElement(element.id);
+                    onSelectEdge(null);
+                  }}
+                >
+                  <g
+                    transform={`matrix(${tangent.x} ${tangent.y} ${normalDir.x} ${normalDir.y} ${boxCenter.x} ${boxCenter.y})`}
+                  >
+                    <rect
+                      x={-halfW}
+                      y={-halfD}
+                      width={pl.clampedWidthCm}
+                      height={element.depthCm}
+                      fill="transparent"
+                    />
+                    {/* Cistern tank */}
+                    <rect
+                      x={-tankW * 0.5}
+                      y={-halfD}
+                      width={tankW}
+                      height={tankD}
+                      rx={3 * s}
+                      fill={bodyFill}
+                      stroke={strokeCol}
+                      strokeWidth={(isSelected ? 2.4 : 1.6) * s}
+                    />
+                    <circle
+                      cx={0}
+                      cy={-halfD + tankD * 0.5}
+                      r={Math.min(3.5, tankD * 0.22)}
+                      fill="#bae6fd"
+                      stroke={strokeCol}
+                      strokeWidth={1 * s}
+                    />
+                    {/* Elongated ceramic bowl & inner seat */}
+                    <ellipse
+                      cx={0}
+                      cy={bowlCy}
+                      rx={halfW * 0.82}
+                      ry={bowlD * 0.52}
+                      fill={bodyFill}
+                      stroke={strokeCol}
+                      strokeWidth={(isSelected ? 2.4 : 1.6) * s}
+                    />
+                    <ellipse
+                      cx={0}
+                      cy={bowlCy + 1.5}
+                      rx={halfW * 0.52}
+                      ry={bowlD * 0.34}
+                      fill="#f0f9ff"
+                      stroke="#38bdf8"
+                      strokeWidth={1.1 * s}
+                    />
+                  </g>
+                  <text
+                    x={boxCenter.x + normalDir.x * (halfD + 9 * s)}
+                    y={boxCenter.y + normalDir.y * (halfD + 9 * s)}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fill="#0369a1"
+                    fontSize={8.5 * s}
+                    fontWeight="600"
+                    className="font-sans pointer-events-none"
+                  >
+                    {element.name}
+                  </text>
+                </g>
+              );
+            }
+
+            if (element.kind === 'urinal') {
+              const halfW = pl.clampedWidthCm * 0.5;
+              const halfD = element.depthCm * 0.5;
+              const outerW = halfW * 0.88;
+              const innerW = halfW * 0.55;
+              const strokeCol = isSelected ? '#1d4ed8' : customStrokeColor || '#0369a1';
+              const bodyFill = customColor || '#ffffff';
+
+              return (
+                <g
+                  key={element.id}
+                  data-interactive="true"
+                  data-element-id={element.id}
+                  className={!readOnly ? 'cursor-move' : 'cursor-pointer'}
+                  onPointerDown={startFreeDrag}
+                  onDoubleClick={handleElementDoubleClick}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectElement(element.id);
+                    onSelectEdge(null);
+                  }}
+                >
+                  <g
+                    transform={`matrix(${tangent.x} ${tangent.y} ${normalDir.x} ${normalDir.y} ${boxCenter.x} ${boxCenter.y})`}
+                  >
+                    <rect
+                      x={-halfW}
+                      y={-halfD}
+                      width={pl.clampedWidthCm}
+                      height={element.depthCm}
+                      fill="transparent"
+                    />
+                    <path
+                      d={`M ${-outerW} ${-halfD} L ${outerW} ${-halfD} L ${outerW} ${-halfD * 0.1} A ${outerW} ${halfD * 1.05} 0 0 1 ${-outerW} ${-halfD * 0.1} Z`}
+                      fill={bodyFill}
+                      stroke={strokeCol}
+                      strokeWidth={(isSelected ? 2.4 : 1.6) * s}
+                    />
+                    <path
+                      d={`M ${-innerW} ${-halfD + 4} L ${innerW} ${-halfD + 4} L ${innerW} ${0} A ${innerW} ${halfD * 0.72} 0 0 1 ${-innerW} ${0} Z`}
+                      fill="#f0f9ff"
+                      stroke="#38bdf8"
+                      strokeWidth={1.1 * s}
+                    />
+                    <circle
+                      cx={0}
+                      cy={-halfD + 6}
+                      r={2.4 * s}
+                      fill="#94a3b8"
+                    />
+                  </g>
+                  <text
+                    x={boxCenter.x + normalDir.x * (halfD + 9 * s)}
+                    y={boxCenter.y + normalDir.y * (halfD + 9 * s)}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fill="#0369a1"
+                    fontSize={8.5 * s}
+                    fontWeight="600"
+                    className="font-sans pointer-events-none"
+                  >
+                    {element.name}
+                  </text>
+                </g>
+              );
+            }
+
+            if (element.kind === 'shower') {
+              const halfW = pl.clampedWidthCm * 0.5;
+              const halfD = element.depthCm * 0.5;
+              const strokeCol = isSelected ? '#1d4ed8' : customStrokeColor || '#4f46e5';
+              const headFill = customColor || '#eef2ff';
+              const headY = -halfD + element.depthCm * 0.42;
+
+              return (
+                <g
+                  key={element.id}
+                  data-interactive="true"
+                  data-element-id={element.id}
+                  className={!readOnly ? 'cursor-move' : 'cursor-pointer'}
+                  onPointerDown={startFreeDrag}
+                  onDoubleClick={handleElementDoubleClick}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectElement(element.id);
+                    onSelectEdge(null);
+                  }}
+                >
+                  <g
+                    transform={`matrix(${tangent.x} ${tangent.y} ${normalDir.x} ${normalDir.y} ${boxCenter.x} ${boxCenter.y})`}
+                  >
+                    <rect
+                      x={-halfW}
+                      y={-halfD}
+                      width={pl.clampedWidthCm}
+                      height={element.depthCm}
+                      fill="transparent"
+                    />
+                    {/* Wall mixer bar */}
+                    <rect
+                      x={-halfW * 0.7}
+                      y={-halfD}
+                      width={pl.clampedWidthCm * 0.7}
+                      height={Math.max(4, element.depthCm * 0.16)}
+                      rx={1.5 * s}
+                      fill="#e2e8f0"
+                      stroke={strokeCol}
+                      strokeWidth={1.3 * s}
+                    />
+                    {/* Arm & overhead rain head */}
+                    <line
+                      x1={0}
+                      y1={-halfD + 3}
+                      x2={0}
+                      y2={headY}
+                      stroke={strokeCol}
+                      strokeWidth={2.2 * s}
+                    />
+                    <circle
+                      cx={0}
+                      cy={headY}
+                      r={Math.min(halfW * 0.48, 7.5)}
+                      fill={headFill}
+                      stroke={strokeCol}
+                      strokeWidth={(isSelected ? 2.4 : 1.6) * s}
+                    />
+                    {/* Spray fan rays */}
+                    {[-0.65, -0.32, 0, 0.32, 0.65].map((frac, idx) => (
+                      <line
+                        key={idx}
+                        x1={0}
+                        y1={headY + 4}
+                        x2={halfW * 0.75 * frac}
+                        y2={halfD}
+                        stroke={customStrokeColor || '#6366f1'}
+                        strokeOpacity="0.6"
+                        strokeWidth={1.1 * s}
+                        strokeDasharray={`${3 * s} ${2.5 * s}`}
+                      />
+                    ))}
+                  </g>
+                  <text
+                    x={boxCenter.x + normalDir.x * (halfD + 9 * s)}
+                    y={boxCenter.y + normalDir.y * (halfD + 9 * s)}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fill="#4338ca"
+                    fontSize={8.5 * s}
+                    fontWeight="600"
+                    className="font-sans pointer-events-none"
+                  >
+                    {element.name}
+                  </text>
+                </g>
+              );
+            }
+
+            if (element.kind === 'sink') {
+              const halfW = pl.clampedWidthCm * 0.5;
+              const halfD = element.depthCm * 0.5;
+              const strokeCol = isSelected ? '#1d4ed8' : customStrokeColor || '#0891b2';
+              const topFill = customColor || '#ecfeff';
+
+              return (
+                <g
+                  key={element.id}
+                  data-interactive="true"
+                  data-element-id={element.id}
+                  className={!readOnly ? 'cursor-move' : 'cursor-pointer'}
+                  onPointerDown={startFreeDrag}
+                  onDoubleClick={handleElementDoubleClick}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectElement(element.id);
+                    onSelectEdge(null);
+                  }}
+                >
+                  <g
+                    transform={`matrix(${tangent.x} ${tangent.y} ${normalDir.x} ${normalDir.y} ${boxCenter.x} ${boxCenter.y})`}
+                  >
+                    {/* Countertop */}
+                    <rect
+                      x={-halfW}
+                      y={-halfD}
+                      width={pl.clampedWidthCm}
+                      height={element.depthCm}
+                      rx={3 * s}
+                      fill={topFill}
+                      stroke={strokeCol}
+                      strokeWidth={(isSelected ? 2.5 : 1.7) * s}
+                    />
+                    {/* Ceramic basin */}
+                    <rect
+                      x={-halfW * 0.78}
+                      y={-halfD + element.depthCm * 0.18}
+                      width={pl.clampedWidthCm * 0.78}
+                      height={element.depthCm * 0.68}
+                      rx={6 * s}
+                      fill="#ffffff"
+                      stroke="#06b6d4"
+                      strokeWidth={1.3 * s}
+                    />
+                    {/* Drain */}
+                    <circle
+                      cx={0}
+                      cy={-halfD + element.depthCm * 0.52}
+                      r={Math.min(3.5, halfW * 0.14)}
+                      fill="#cffafe"
+                      stroke="#0891b2"
+                      strokeWidth={1.1 * s}
+                    />
+                    {/* Faucet spout & deck */}
+                    <line
+                      x1={0}
+                      y1={-halfD + 3}
+                      x2={0}
+                      y2={-halfD + element.depthCm * 0.34}
+                      stroke="#334155"
+                      strokeWidth={2.4 * s}
+                      strokeLinecap="round"
+                    />
+                    <circle cx={-5} cy={-halfD + 5} r={1.8 * s} fill="#64748b" />
+                    <circle cx={5} cy={-halfD + 5} r={1.8 * s} fill="#64748b" />
+                  </g>
+                  <text
+                    x={boxCenter.x + normalDir.x * (halfD + 9 * s)}
+                    y={boxCenter.y + normalDir.y * (halfD + 9 * s)}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fill="#0e7490"
+                    fontSize={8.5 * s}
+                    fontWeight="600"
+                    className="font-sans pointer-events-none"
+                  >
+                    {element.name}
+                  </text>
+                </g>
+              );
+            }
+
+            if (element.kind === 'bed_curtain') {
+              const halfW = pl.clampedWidthCm * 0.5;
+              const halfD = element.depthCm * 0.5;
+              const lTrackPath = `M ${-halfW} ${-halfD} L ${-halfW} ${halfD} L ${halfW} ${halfD}`;
+
+              // Build pleated wave path along both L arms
+              const waveSegments: string[] = [];
+              const step = 14;
+              const amp = 4.2;
+              const vSteps = Math.max(4, Math.round((halfD * 2) / step));
+              waveSegments.push(`M ${-halfW} ${-halfD}`);
+              for (let i = 1; i <= vSteps; i++) {
+                const yPos = -halfD + (i / vSteps) * (halfD * 2);
+                const xOff = i === vSteps ? 0 : (i % 2 === 1 ? amp : -amp);
+                waveSegments.push(`L ${-halfW + xOff} ${yPos}`);
+              }
+              const hSteps = Math.max(4, Math.round((halfW * 2) / step));
+              for (let i = 1; i <= hSteps; i++) {
+                const xPos = -halfW + (i / hSteps) * (halfW * 2);
+                const yOff = i === hSteps ? 0 : (i % 2 === 1 ? -amp : amp);
+                waveSegments.push(`L ${xPos} ${halfD + yOff}`);
+              }
+              const wavePath = waveSegments.join(' ');
+              const labelPt = {
+                x: boxCenter.x - tangent.x * (halfW * 0.35) + normalDir.x * (halfD + 11 * s),
+                y: boxCenter.y - tangent.y * (halfW * 0.35) + normalDir.y * (halfD + 11 * s),
+              };
+
+              return (
+                <g
+                  key={element.id}
+                  data-interactive="true"
+                  data-element-id={element.id}
+                  className={!readOnly ? 'cursor-move' : 'cursor-pointer'}
+                  onPointerDown={startFreeDrag}
+                  onDoubleClick={handleElementDoubleClick}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectElement(element.id);
+                    onSelectEdge(null);
+                  }}
+                >
+                  <g
+                    transform={`matrix(${tangent.x} ${tangent.y} ${normalDir.x} ${normalDir.y} ${boxCenter.x} ${boxCenter.y})`}
+                  >
+                    {/* Hit stroke ONLY along the L arms so beds inside stay clickable */}
+                    <path
+                      d={lTrackPath}
+                      fill="none"
+                      stroke="transparent"
+                      strokeWidth={38 * s}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    {/* Dashed ceiling L-track */}
+                    <path
+                      d={lTrackPath}
+                      fill="none"
+                      stroke={isSelected ? '#1d4ed8' : customStrokeColor || '#047857'}
+                      strokeWidth={(isSelected ? 2.8 : 2) * s}
+                      strokeDasharray={`${6 * s} ${4 * s}`}
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    {/* Pleated fabric line */}
+                    <path
+                      d={wavePath}
+                      fill="none"
+                      stroke={isSelected ? '#3b82f6' : customColor || '#10b981'}
+                      strokeWidth={(isSelected ? 2.2 : 1.7) * s}
+                      strokeLinejoin="round"
+                    />
+                    {/* Track end & corner grab handle */}
+                    <circle cx={-halfW} cy={-halfD} r={3.5 * s} fill={customStrokeColor || '#047857'} />
+                    <circle
+                      cx={-halfW}
+                      cy={halfD}
+                      r={6.5 * s}
+                      fill="#ecfdf5"
+                      stroke={isSelected ? '#1d4ed8' : customStrokeColor || '#047857'}
+                      strokeWidth={2 * s}
+                    />
+                    <circle cx={halfW} cy={halfD} r={3.5 * s} fill={customStrokeColor || '#047857'} />
+                  </g>
+                  <text
+                    x={labelPt.x}
+                    y={labelPt.y}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fill="#047857"
+                    fontSize={8.8 * s}
+                    fontWeight="600"
+                    className={!readOnly ? 'font-sans cursor-move' : 'font-sans pointer-events-none'}
+                  >
+                    {element.name} ({Math.round(pl.clampedWidthCm)}×{Math.round(element.depthCm)})
+                  </text>
+                </g>
+              );
+            }
+
+            if (!edge) return null;
+
+            if (element.kind === 'window') {
+              const offsetSide = wallStroke * 0.3;
+              const customWinHex = sanitizeHexColor(element.color);
+              const winFrameStroke = isSelected
+                ? '#1d4ed8'
+                : customWinHex
+                  ? darkenHexColor(customWinHex, 0.72)
+                  : '#0284c7';
+              const winGlassStroke = customWinHex ?? '#38bdf8';
+              const winTextFill = customWinHex ? darkenHexColor(customWinHex, 0.56) : '#0369a1';
+              return (
+                <g
+                  key={element.id}
+                  data-interactive="true"
+                  data-element-id={element.id}
+                  className={!readOnly ? 'cursor-grab' : 'cursor-pointer'}
+                  onPointerDown={startFreeDrag}
                   onDoubleClick={handleElementDoubleClick}
                   onClick={(e) => {
                     e.stopPropagation();
@@ -1386,7 +2359,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                     y1={startPoint.y + edge.outwardNormal.y * offsetSide}
                     x2={endPoint.x + edge.outwardNormal.x * offsetSide}
                     y2={endPoint.y + edge.outwardNormal.y * offsetSide}
-                    stroke={isSelected ? '#1d4ed8' : '#0284c7'}
+                    stroke={winFrameStroke}
                     strokeWidth={2 * s}
                   />
                   <line
@@ -1394,7 +2367,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                     y1={startPoint.y - edge.outwardNormal.y * offsetSide}
                     x2={endPoint.x - edge.outwardNormal.x * offsetSide}
                     y2={endPoint.y - edge.outwardNormal.y * offsetSide}
-                    stroke={isSelected ? '#1d4ed8' : '#0284c7'}
+                    stroke={winFrameStroke}
                     strokeWidth={2 * s}
                   />
                   {/* Center glass pane line */}
@@ -1403,7 +2376,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                     y1={startPoint.y}
                     x2={endPoint.x}
                     y2={endPoint.y}
-                    stroke="#38bdf8"
+                    stroke={winGlassStroke}
                     strokeWidth={3.2 * s}
                   />
                   <text
@@ -1411,7 +2384,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                     y={center.y + edge.inwardNormal.y * 18 * s}
                     textAnchor="middle"
                     dominantBaseline="central"
-                    fill="#0369a1"
+                    fill={winTextFill}
                     fontSize={9.5 * s}
                     fontWeight="600"
                     className="pointer-events-none"
@@ -1427,6 +2400,18 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
               element.swingDirection
             );
             const swingNormal = doorSide === 'outward' ? pl.outwardNormal : pl.inwardNormal;
+            const customDoorHex = sanitizeHexColor(element.color);
+            const doorLeafStroke = isSelected
+              ? '#1d4ed8'
+              : customDoorHex
+                ? darkenHexColor(customDoorHex, 0.78)
+                : '#0f172a';
+            const doorAccentStroke = isSelected
+              ? '#1d4ed8'
+              : customDoorHex
+                ? darkenHexColor(customDoorHex, 0.65)
+                : '#2563eb';
+            const doorTextFill = customDoorHex ? darkenHexColor(customDoorHex, 0.56) : '#1e40af';
 
             if (doorMode === 'sliding') {
               const slideDirVec: Point2D =
@@ -1493,7 +2478,8 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                   data-interactive="true"
                   data-element-id={element.id}
                   data-door-swing={element.swingDirection || 'inward-right'}
-                  className="cursor-pointer"
+                  className={!readOnly ? 'cursor-grab' : 'cursor-pointer'}
+                  onPointerDown={startFreeDrag}
                   onDoubleClick={handleElementDoubleClick}
                   onClick={(e) => {
                     e.stopPropagation();
@@ -1543,7 +2529,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                     y1={leafStart.y}
                     x2={leafEnd.x}
                     y2={leafEnd.y}
-                    stroke={isSelected ? '#1d4ed8' : '#0f172a'}
+                    stroke={doorLeafStroke}
                     strokeWidth={4.4 * s}
                     strokeLinecap="square"
                   />
@@ -1553,12 +2539,12 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                     y1={arrA.y}
                     x2={arrB.x}
                     y2={arrB.y}
-                    stroke={isSelected ? '#1d4ed8' : '#2563eb'}
+                    stroke={doorAccentStroke}
                     strokeWidth={1.6 * s}
                   />
                   <polygon
                     points={`${arrB.x},${arrB.y} ${headL.x},${headL.y} ${headR.x},${headR.y}`}
-                    fill={isSelected ? '#1d4ed8' : '#2563eb'}
+                    fill={doorAccentStroke}
                   />
                   {/* Sliding door label */}
                   <text
@@ -1566,7 +2552,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                     y={center.y + swingNormal.y * (arrowOff + 13 * s)}
                     textAnchor="middle"
                     dominantBaseline="central"
-                    fill="#1e40af"
+                    fill={doorTextFill}
                     fontSize={9.5 * s}
                     fontWeight="600"
                     className="pointer-events-none"
@@ -1599,7 +2585,8 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                 data-interactive="true"
                 data-element-id={element.id}
                 data-door-swing={element.swingDirection || 'inward-right'}
-                className="cursor-pointer"
+                className={!readOnly ? 'cursor-grab' : 'cursor-pointer'}
+                onPointerDown={startFreeDrag}
                 onDoubleClick={handleElementDoubleClick}
                 onClick={(e) => {
                   e.stopPropagation();
@@ -1639,7 +2626,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                   y1={hinge.y}
                   x2={leafTip.x}
                   y2={leafTip.y}
-                  stroke={isSelected ? '#1d4ed8' : '#0f172a'}
+                  stroke={doorLeafStroke}
                   strokeWidth={3.5 * s}
                   strokeLinecap="round"
                 />
@@ -1647,7 +2634,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                 <path
                   d={`M ${latch.x} ${latch.y} A ${pl.clampedWidthCm} ${pl.clampedWidthCm} 0 0 ${sweepFlag} ${leafTip.x} ${leafTip.y}`}
                   fill="none"
-                  stroke={isSelected ? '#1d4ed8' : '#2563eb'}
+                  stroke={doorAccentStroke}
                   strokeWidth={1.5 * s}
                   strokeDasharray={`${5 * s} ${4 * s}`}
                 />
@@ -1657,7 +2644,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                   y={center.y + swingNormal.y * Math.min(48 * s, pl.clampedWidthCm * 0.45)}
                   textAnchor="middle"
                   dominantBaseline="central"
-                  fill="#1e40af"
+                  fill={doorTextFill}
                   fontSize={10 * s}
                   fontWeight="600"
                   className="pointer-events-none"
@@ -2016,6 +3003,25 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
             </g>
           )}
 
+          {/* Magnetic Snap Alignment Guides (active only while dragging) */}
+          {snapGuides.length > 0 && (
+            <g className="pointer-events-none" data-export-exclude="true">
+              {snapGuides.map((g, idx) => (
+                <line
+                  key={`snap-guide-${idx}`}
+                  data-testid="snap-guide"
+                  x1={g.axis === 'x' ? g.positionCm : g.startCm}
+                  y1={g.axis === 'y' ? g.positionCm : g.startCm}
+                  x2={g.axis === 'x' ? g.positionCm : g.endCm}
+                  y2={g.axis === 'y' ? g.positionCm : g.endCm}
+                  stroke={g.reason === 'wall' ? '#ec4899' : g.reason === 'element' ? '#0284c7' : '#8b5cf6'}
+                  strokeWidth={1.8 * s}
+                  strokeDasharray={`${5 * s} ${3 * s}`}
+                />
+              ))}
+            </g>
+          )}
+
           {/* Room Center Summary Watermark Info (clean architectural tag) */}
           {solved.polygonPoints.length >= 3 && (
             <g className="pointer-events-none">
@@ -2285,6 +3291,23 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
               >
                 <Scissors className="w-3.5 h-3.5" />
                 <span>畫剖面線</span>
+              </button>
+            )}
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={handleToggleSnap}
+                aria-pressed={effectiveSnapEnabled}
+                aria-label="切換移動元件磁吸貼齊功能"
+                title="拖曳元件時自動貼齊牆面與其他設備（拖曳時按住 Shift 可暫時取消）"
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                  effectiveSnapEnabled
+                    ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                    : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                }`}
+              >
+                <Magnet className="w-3.5 h-3.5" />
+                <span>磁吸貼齊</span>
               </button>
             )}
             <button

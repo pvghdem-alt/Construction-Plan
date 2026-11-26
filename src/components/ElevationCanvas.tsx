@@ -16,11 +16,15 @@ import type {
   SolvedFloorplan,
 } from '../types/floorplan';
 import {
+  buildElevationRenderItems,
   computeSectionElevation,
   createPresetSectionLine,
+  darkenHexColor,
   formatDimension,
+  getContrastTextColor,
   getSectionBasis,
   parseDoorSwing,
+  sanitizeHexColor,
 } from '../utils/floorplanGeometry';
 import { buildElevationSvgString } from '../utils/drawingSvgExport';
 
@@ -75,6 +79,11 @@ export const ElevationCanvas: React.FC<ElevationCanvasProps> = ({
     if (!activeSection) return null;
     return computeSectionElevation(project, solved, placements, activeSection);
   }, [project, solved, placements, activeSection]);
+
+  const renderItems = useMemo(
+    () => (elevation ? buildElevationRenderItems(elevation) : []),
+    [elevation]
+  );
 
   const viewMetrics = useMemo(() => {
     if (!elevation) {
@@ -347,105 +356,217 @@ export const ElevationCanvas: React.FC<ElevationCanvasProps> = ({
             strokeDasharray={`${6 * s} ${4 * s}`}
           />
 
-          {/* Projected Wall Segments (sorted back to front) */}
-          {elevation.walls.map((w, idx) => {
-            const ww = Math.max(4, w.sEndCm - w.sStartCm);
-            return (
-              <g key={`ew-${w.wallId}-${idx}`}>
-                <rect
-                  x={w.sStartCm}
-                  y={-w.heightCm}
-                  width={ww}
-                  height={w.heightCm}
-                  fill={w.isCutThrough ? '#e2e8f0' : w.isInterior ? '#f8fafc' : '#f1f5f9'}
-                  stroke={w.isCutThrough ? '#0f172a' : '#475569'}
-                  strokeWidth={(w.isCutThrough ? 2.4 : 1.5) * s}
-                />
-                {w.isCutThrough && (
+          {/* Unified Depth-Sorted Walls, Furniture, and Openings (back to front) */}
+          {renderItems.map((item) => {
+            if (item.kind === 'wall') {
+              const w = item.wall;
+              const ww = Math.max(4, w.sEndCm - w.sStartCm);
+              const customWallHex = sanitizeHexColor(project.wallColor);
+              const wallFill = w.isCutThrough
+                ? '#e2e8f0'
+                : customWallHex ?? (w.isInterior ? '#f8fafc' : '#f1f5f9');
+              return (
+                <g key={`ew-${w.wallId}-${item.wallIndex}`}>
                   <rect
                     x={w.sStartCm}
                     y={-w.heightCm}
                     width={ww}
                     height={w.heightCm}
-                    fill="url(#elev-cut-hatch)"
+                    fill={wallFill}
+                    stroke={w.isCutThrough ? '#0f172a' : '#475569'}
+                    strokeWidth={(w.isCutThrough ? 2.4 : 1.5) * s}
                   />
-                )}
-              </g>
-            );
-          })}
+                  {w.isCutThrough && (
+                    <rect
+                      x={w.sStartCm}
+                      y={-w.heightCm}
+                      width={ww}
+                      height={w.heightCm}
+                      fill="url(#elev-cut-hatch)"
+                    />
+                  )}
+                </g>
+              );
+            }
 
-          {/* Projected Furniture Items */}
-          {elevation.furniture.map((f) => {
-            const fw = Math.max(4, f.sEndCm - f.sStartCm);
-            const yTop = -(f.elevationCm + f.heightCm);
-            const isSel = selectedElementId === f.elementId;
-            const palette: Record<string, { fill: string; stroke: string }> = {
-              cabinet: { fill: '#fef3c7', stroke: '#b45309' },
-              bed: { fill: '#ccfbf1', stroke: '#0f766e' },
-              table: { fill: '#fef9c3', stroke: '#a16207' },
-              chair: { fill: '#e2e8f0', stroke: '#475569' },
-            };
-            const p = palette[f.kind] ?? { fill: '#f1f5f9', stroke: '#475569' };
-            const midX = (f.sStartCm + f.sEndCm) * 0.5;
-            return (
-              <g
-                key={`ef-${f.elementId}`}
-                data-interactive="true"
-                className="cursor-pointer"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onSelectElement(f.elementId);
-                }}
-              >
-                <rect
-                  x={f.sStartCm}
-                  y={yTop}
-                  width={fw}
-                  height={f.heightCm}
-                  fill={p.fill}
-                  fillOpacity="0.9"
-                  stroke={isSel ? '#2563eb' : p.stroke}
-                  strokeWidth={(isSel ? 2.4 : 1.5) * s}
-                />
-                {f.kind === 'cabinet' && fw > 55 && (
-                  <line
-                    x1={midX}
-                    y1={yTop + 4 * s}
-                    x2={midX}
-                    y2={yTop + f.heightCm - 4 * s}
-                    stroke={p.stroke}
-                    strokeOpacity="0.45"
-                    strokeWidth={1 * s}
-                  />
-                )}
-                <text
-                  x={midX}
-                  y={yTop + f.heightCm * 0.5}
-                  textAnchor="middle"
-                  dominantBaseline="central"
-                  fill="#1e293b"
-                  fontSize={8.5 * s}
-                  fontWeight="600"
-                  className="pointer-events-none"
+            if (item.kind === 'furniture') {
+              const f = item.furniture;
+              const fw = Math.max(4, f.sEndCm - f.sStartCm);
+              const yTop = -(f.elevationCm + f.heightCm);
+              const isSel = selectedElementId === f.elementId;
+              const palette: Record<string, { fill: string; stroke: string; opacity?: number }> = {
+                cabinet: { fill: '#fef3c7', stroke: '#b45309' },
+                wall_cabinet: { fill: '#ffedd5', stroke: '#c2410c', opacity: 0.9 },
+                kitchen_counter: { fill: '#ffedd5', stroke: '#9a3412' },
+                bed: { fill: '#ccfbf1', stroke: '#0f766e' },
+                bed_curtain: { fill: '#d1fae5', stroke: '#059669', opacity: 0.42 },
+                table: { fill: '#fef9c3', stroke: '#a16207' },
+                round_table: { fill: '#fef3c7', stroke: '#92400e' },
+                chair: { fill: '#e2e8f0', stroke: '#475569' },
+                sofa: { fill: '#ede9fe', stroke: '#6d28d9' },
+                toilet: { fill: '#f0f9ff', stroke: '#0284c7' },
+                urinal: { fill: '#f0f9ff', stroke: '#0369a1' },
+                shower: { fill: '#eef2ff', stroke: '#4f46e5' },
+                sink: { fill: '#ecfeff', stroke: '#0891b2' },
+              };
+              const baseP = palette[f.kind] ?? { fill: '#f1f5f9', stroke: '#475569' };
+              const customHex = sanitizeHexColor(f.color);
+              const fillHex = customHex ?? baseP.fill;
+              const strokeHex = customHex ? darkenHexColor(customHex, 0.58) : baseP.stroke;
+              const textColor = customHex ? getContrastTextColor(customHex) : '#1e293b';
+              const midX = (f.sStartCm + f.sEndCm) * 0.5;
+              const visMidX =
+                ((f.visibleSStartCm ?? f.sStartCm) + (f.visibleSEndCm ?? f.sEndCm)) * 0.5;
+              return (
+                <g
+                  key={`ef-${f.elementId}`}
+                  data-interactive="true"
+                  className="cursor-pointer"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectElement(f.elementId);
+                  }}
                 >
-                  {f.name}
-                </text>
-              </g>
-            );
-          })}
+                  <rect
+                    x={f.sStartCm}
+                    y={yTop}
+                    width={fw}
+                    height={f.heightCm}
+                    fill={fillHex}
+                    fillOpacity={baseP.opacity ?? 0.95}
+                    stroke={isSel ? '#2563eb' : strokeHex}
+                    strokeWidth={(isSel ? 2.4 : 1.5) * s}
+                    strokeDasharray={f.kind === 'wall_cabinet' ? `${5 * s} ${3 * s}` : undefined}
+                  />
+                  {(f.kind === 'cabinet' || f.kind === 'wall_cabinet') && fw > 55 && (
+                    <line
+                      x1={midX}
+                      y1={yTop + 4 * s}
+                      x2={midX}
+                      y2={yTop + f.heightCm - 4 * s}
+                      stroke={strokeHex}
+                      strokeOpacity="0.45"
+                      strokeWidth={1 * s}
+                    />
+                  )}
+                  {f.kind === 'kitchen_counter' && (
+                    <>
+                      <line
+                        x1={f.sStartCm}
+                        y1={yTop + 5 * s}
+                        x2={f.sEndCm}
+                        y2={yTop + 5 * s}
+                        stroke={strokeHex}
+                        strokeWidth={1.3 * s}
+                      />
+                      <path
+                        d={`M ${f.sStartCm + fw * 0.25} ${yTop} L ${f.sStartCm + fw * 0.25} ${yTop - 16 * s} Q ${f.sStartCm + fw * 0.25} ${yTop - 22 * s} ${f.sStartCm + fw * 0.25 + 8 * s} ${yTop - 18 * s}`}
+                        fill="none"
+                        stroke="#475569"
+                        strokeWidth={1.8 * s}
+                        strokeLinecap="round"
+                      />
+                    </>
+                  )}
+                  {f.kind === 'sofa' && (
+                    <line
+                      x1={f.sStartCm + fw * 0.1}
+                      y1={yTop + f.heightCm * 0.45}
+                      x2={f.sEndCm - fw * 0.1}
+                      y2={yTop + f.heightCm * 0.45}
+                      stroke={strokeHex}
+                      strokeOpacity="0.55"
+                      strokeWidth={1.2 * s}
+                    />
+                  )}
+                  {f.kind === 'round_table' && (
+                    <line
+                      x1={f.sStartCm}
+                      y1={yTop + 5 * s}
+                      x2={f.sEndCm}
+                      y2={yTop + 5 * s}
+                      stroke={strokeHex}
+                      strokeWidth={1.6 * s}
+                    />
+                  )}
+                  {f.kind === 'bed_curtain' && (
+                    <>
+                      <line
+                        x1={f.sStartCm}
+                        y1={yTop}
+                        x2={f.sEndCm}
+                        y2={yTop}
+                        stroke="#047857"
+                        strokeWidth={2.4 * s}
+                      />
+                      {Array.from({ length: Math.max(2, Math.floor(fw / 28)) }, (_, idx) => {
+                        const px = f.sStartCm + ((idx + 1) * fw) / (Math.max(2, Math.floor(fw / 28)) + 1);
+                        return (
+                          <line
+                            key={idx}
+                            x1={px}
+                            y1={yTop + 3 * s}
+                            x2={px}
+                            y2={yTop + f.heightCm - 3 * s}
+                            stroke="#059669"
+                            strokeOpacity="0.35"
+                            strokeWidth={1 * s}
+                            strokeDasharray={`${4 * s} ${3 * s}`}
+                          />
+                        );
+                      })}
+                    </>
+                  )}
+                  <text
+                    x={visMidX}
+                    y={yTop + f.heightCm * 0.5}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fill={textColor}
+                    fontSize={8.5 * s}
+                    fontWeight="600"
+                    className="pointer-events-none"
+                  >
+                    {f.name}
+                  </text>
+                </g>
+              );
+            }
 
-          {/* Projected Windows & Doors + Full Dimension Annotations */}
-          {elevation.openings.map((op, idx) => {
+            const op = item.opening;
             const ow = Math.max(6, op.sEndCm - op.sStartCm);
             const yTop = -(op.elevationCm + op.heightCm);
             const midX = (op.sStartCm + op.sEndCm) * 0.5;
+            const visMidX =
+              ((op.visibleSStartCm ?? op.sStartCm) + (op.visibleSEndCm ?? op.sEndCm)) * 0.5;
             const midY = yTop + op.heightCm * 0.5;
             const isSel = selectedElementId === op.elementId;
-            const laneOffset = (idx % 2) * 18 * s;
-            const dimY = yTop - (16 * s + laneOffset);
-            const wText = `寬 ${formatDimension(op.actualWidthCm, project.unit)}`;
             const hText = `高 ${formatDimension(op.heightCm, project.unit)}`;
-            const wBoxW = Math.max(48, wText.length * 6.8 + 12) * s;
+            const customOpFill = sanitizeHexColor(op.color);
+            const opOuterFill = customOpFill ?? (op.kind === 'window' ? '#e0f2fe' : '#fef3c7');
+            const opInnerFill = customOpFill
+              ? darkenHexColor(customOpFill, 0.88)
+              : op.kind === 'window'
+                ? '#bae6fd'
+                : '#fde68a';
+            const opStroke = isSel
+              ? '#1d4ed8'
+              : customOpFill
+                ? darkenHexColor(customOpFill, 0.58)
+                : op.kind === 'window'
+                  ? '#0284c7'
+                  : '#78350f';
+            const opSubStroke = customOpFill
+              ? darkenHexColor(customOpFill, 0.65)
+              : op.kind === 'window'
+                ? '#0369a1'
+                : '#92400e';
+            const opTextColor = customOpFill ? getContrastTextColor(opOuterFill) : '#0f172a';
+            const opSubTextColor = customOpFill
+              ? getContrastTextColor(opOuterFill)
+              : op.kind === 'window'
+                ? '#0369a1'
+                : '#78350f';
 
             return (
               <g
@@ -464,8 +585,8 @@ export const ElevationCanvas: React.FC<ElevationCanvasProps> = ({
                       y={yTop}
                       width={ow}
                       height={op.heightCm}
-                      fill="#e0f2fe"
-                      stroke={isSel ? '#1d4ed8' : '#0284c7'}
+                      fill={opOuterFill}
+                      stroke={opStroke}
                       strokeWidth={(isSel ? 2.8 : 2.1) * s}
                     />
                     <rect
@@ -473,9 +594,9 @@ export const ElevationCanvas: React.FC<ElevationCanvasProps> = ({
                       y={yTop + Math.min(ow, op.heightCm) * 0.08}
                       width={Math.max(2, ow - Math.min(ow, op.heightCm) * 0.16)}
                       height={Math.max(2, op.heightCm - Math.min(ow, op.heightCm) * 0.16)}
-                      fill="#bae6fd"
+                      fill={opInnerFill}
                       fillOpacity="0.6"
-                      stroke="#0369a1"
+                      stroke={opSubStroke}
                       strokeWidth={1.1 * s}
                     />
                     <line
@@ -483,7 +604,7 @@ export const ElevationCanvas: React.FC<ElevationCanvasProps> = ({
                       y1={yTop + Math.min(ow, op.heightCm) * 0.08}
                       x2={midX}
                       y2={yTop + op.heightCm - Math.min(ow, op.heightCm) * 0.08}
-                      stroke="#0369a1"
+                      stroke={opSubStroke}
                       strokeWidth={1.2 * s}
                     />
                   </>
@@ -506,8 +627,8 @@ export const ElevationCanvas: React.FC<ElevationCanvasProps> = ({
                           y={yTop}
                           width={ow}
                           height={op.heightCm}
-                          fill="#fef3c7"
-                          stroke={isSel ? '#1d4ed8' : '#78350f'}
+                          fill={opOuterFill}
+                          stroke={opStroke}
                           strokeWidth={(isSel ? 2.8 : 2.2) * s}
                         />
                         <rect
@@ -515,9 +636,9 @@ export const ElevationCanvas: React.FC<ElevationCanvasProps> = ({
                           y={yTop + inset}
                           width={Math.max(2, ow - inset * 2)}
                           height={Math.max(2, op.heightCm - inset)}
-                          fill="#fde68a"
+                          fill={opInnerFill}
                           fillOpacity="0.45"
-                          stroke="#92400e"
+                          stroke={opSubStroke}
                           strokeWidth={1.2 * s}
                         />
                         {parsedDoor.mode === 'sliding' ? (
@@ -557,13 +678,13 @@ export const ElevationCanvas: React.FC<ElevationCanvasProps> = ({
                   })()
                 )}
 
-                {/* Opening name & height label */}
+                {/* Opening name & height label positioned in visible span */}
                 <text
-                  x={midX}
+                  x={visMidX}
                   y={midY - 7 * s}
                   textAnchor="middle"
                   dominantBaseline="central"
-                  fill="#0f172a"
+                  fill={opTextColor}
                   fontSize={9.5 * s}
                   fontWeight="700"
                   className="pointer-events-none"
@@ -571,45 +692,62 @@ export const ElevationCanvas: React.FC<ElevationCanvasProps> = ({
                   {op.name}
                 </text>
                 <text
-                  x={midX}
+                  x={visMidX}
                   y={midY + 8 * s}
                   textAnchor="middle"
                   dominantBaseline="central"
-                  fill={op.kind === 'window' ? '#0369a1' : '#78350f'}
+                  fill={opSubTextColor}
                   fontSize={8.8 * s}
                   fontWeight="700"
                   className="font-mono tabular-nums pointer-events-none"
                 >
                   {hText}
                 </text>
+              </g>
+            );
+          })}
 
-                {/* Top Width Dimension Callout */}
+          {/* Visible Opening Dimension & Sill Annotations (drawn above geometry so lines never hide behind cut walls) */}
+          {elevation.openings.map((op, idx) => {
+            const yTop = -(op.elevationCm + op.heightCm);
+            const dimStart = op.dimSStartCm ?? op.sStartCm;
+            const dimEnd = op.dimSEndCm ?? op.sEndCm;
+            const dimMidX = (dimStart + dimEnd) * 0.5;
+            const visMidX =
+              ((op.visibleSStartCm ?? op.sStartCm) + (op.visibleSEndCm ?? op.sEndCm)) * 0.5;
+            const laneOffset = (idx % 2) * 18 * s;
+            const dimY = yTop - (16 * s + laneOffset);
+            const wText = `寬 ${formatDimension(op.actualWidthCm, project.unit)}`;
+            const wBoxW = Math.max(48, wText.length * 6.8 + 12) * s;
+
+            return (
+              <g key={`eo-dim-${op.elementId}`} className="pointer-events-none">
                 <line
-                  x1={op.sStartCm}
+                  x1={dimStart}
                   y1={yTop - 2 * s}
-                  x2={op.sStartCm}
+                  x2={dimStart}
                   y2={dimY - 4 * s}
                   stroke="#64748b"
                   strokeWidth={0.9 * s}
                 />
                 <line
-                  x1={op.sEndCm}
+                  x1={dimEnd}
                   y1={yTop - 2 * s}
-                  x2={op.sEndCm}
+                  x2={dimEnd}
                   y2={dimY - 4 * s}
                   stroke="#64748b"
                   strokeWidth={0.9 * s}
                 />
                 <line
-                  x1={op.sStartCm}
+                  x1={dimStart}
                   y1={dimY}
-                  x2={op.sEndCm}
+                  x2={dimEnd}
                   y2={dimY}
                   stroke="#2563eb"
                   strokeWidth={1.2 * s}
                 />
                 <rect
-                  x={midX - wBoxW * 0.5}
+                  x={dimMidX - wBoxW * 0.5}
                   y={dimY - 7 * s}
                   width={wBoxW}
                   height={14 * s}
@@ -619,39 +757,38 @@ export const ElevationCanvas: React.FC<ElevationCanvasProps> = ({
                   strokeWidth={0.9 * s}
                 />
                 <text
-                  x={midX}
+                  x={dimMidX}
                   y={dimY}
                   textAnchor="middle"
                   dominantBaseline="central"
                   fill="#1d4ed8"
                   fontSize={8.8 * s}
                   fontWeight="700"
-                  className="font-mono tabular-nums pointer-events-none"
+                  className="font-mono tabular-nums"
                 >
                   {wText}
                 </text>
 
-                {/* Sill elevation callout when window/opening is elevated */}
                 {op.elevationCm > 0 && (
                   <>
                     <line
-                      x1={midX}
+                      x1={visMidX}
                       y1={0}
-                      x2={midX}
+                      x2={visMidX}
                       y2={-op.elevationCm}
                       stroke="#0284c7"
                       strokeWidth={1.2 * s}
                       strokeDasharray={`${3 * s} ${2 * s}`}
                     />
                     <text
-                      x={midX}
+                      x={visMidX}
                       y={-op.elevationCm * 0.5}
                       textAnchor="middle"
                       dominantBaseline="central"
                       fill="#0369a1"
                       fontSize={8.5 * s}
                       fontWeight="700"
-                      className="font-mono tabular-nums pointer-events-none"
+                      className="font-mono tabular-nums"
                     >
                       台高 {formatDimension(op.elevationCm, project.unit)}
                     </text>

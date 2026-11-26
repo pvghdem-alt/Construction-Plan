@@ -1,7 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { X, Trash2, Check } from 'lucide-react';
+import { X, Trash2, Check, Palette } from 'lucide-react';
 import type { DoorSwing, ElementKind, FloorplanElement, UnitType } from '../types/floorplan';
-import { buildDoorSwing, formatDimension, parseDoorSwing } from '../utils/floorplanGeometry';
+import {
+  buildDoorSwing,
+  ELEMENT_COLOR_PRESETS,
+  formatDimension,
+  parseDoorSwing,
+  sanitizeHexColor,
+} from '../utils/floorplanGeometry';
 
 interface ElementDimensionsModalProps {
   element: FloorplanElement | null;
@@ -15,9 +21,18 @@ const KIND_LABELS: Record<ElementKind, string> = {
   door: '門扇',
   window: '窗戶',
   cabinet: '櫃體',
+  wall_cabinet: '吊櫃',
+  kitchen_counter: '廚房一字櫥櫃',
   table: '桌子',
+  round_table: '圓桌',
   chair: '椅子',
+  sofa: '沙發',
   bed: '病床',
+  bed_curtain: '病床隔簾(L型)',
+  toilet: '馬桶',
+  urinal: '小便斗',
+  shower: '蓮蓬頭',
+  sink: '洗手台',
 };
 
 export const ElementDimensionsModal: React.FC<ElementDimensionsModalProps> = ({
@@ -37,6 +52,7 @@ export const ElementDimensionsModal: React.FC<ElementDimensionsModalProps> = ({
   const [yCm, setYCm] = useState('0');
   const [rotationDeg, setRotationDeg] = useState('0');
   const [swingDirection, setSwingDirection] = useState<DoorSwing>('inward-right');
+  const [color, setColor] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
@@ -51,6 +67,7 @@ export const ElementDimensionsModal: React.FC<ElementDimensionsModalProps> = ({
     setYCm(String(Math.round(element.yCm ?? 0)));
     setRotationDeg(String(Math.round(element.rotationDeg ?? 0)));
     setSwingDirection(element.swingDirection || 'inward-right');
+    setColor(sanitizeHexColor(element.color) ?? '');
     setErrorMsg(null);
   }, [element]);
 
@@ -102,6 +119,7 @@ export const ElementDimensionsModal: React.FC<ElementDimensionsModalProps> = ({
       depthCm: Math.round(d * 10) / 10,
       heightCm: Math.round(h * 10) / 10,
       elevationCm: Math.round(elev * 10) / 10,
+      color: sanitizeHexColor(color),
     };
 
     if (isFree) {
@@ -454,6 +472,56 @@ export const ElementDimensionsModal: React.FC<ElementDimensionsModalProps> = ({
               )}
             </div>
           )}
+
+          <div className="pt-2 border-t border-slate-100 space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="flex items-center gap-1.5 text-xs font-medium text-slate-700">
+                <Palette className="w-3.5 h-3.5 text-slate-500" />
+                <span>物品色彩</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setColor('')}
+                className={`px-2 py-0.5 text-[11px] rounded border transition-colors ${
+                  !color
+                    ? 'bg-slate-900 text-white border-slate-900'
+                    : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                }`}
+              >
+                預設材質
+              </button>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              {ELEMENT_COLOR_PRESETS.map((preset) => {
+                const active = sanitizeHexColor(color) === preset.hex;
+                return (
+                  <button
+                    key={preset.hex}
+                    type="button"
+                    title={preset.label}
+                    aria-label={`物品色彩：${preset.label}`}
+                    onClick={() => setColor(preset.hex)}
+                    className={`w-6 h-6 rounded-md border transition-transform ${
+                      active
+                        ? 'border-blue-600 ring-2 ring-blue-500/40 scale-110'
+                        : 'border-slate-300 hover:scale-105'
+                    }`}
+                    style={{ backgroundColor: preset.hex }}
+                  />
+                );
+              })}
+              <label className="flex items-center gap-1 text-[11px] text-slate-600 cursor-pointer ml-auto">
+                <span>自訂</span>
+                <input
+                  type="color"
+                  aria-label="物品自訂色彩"
+                  value={sanitizeHexColor(color) ?? '#d9b382'}
+                  onChange={(e) => setColor(e.target.value)}
+                  className="w-6 h-6 p-0 border border-slate-300 rounded cursor-pointer bg-transparent"
+                />
+              </label>
+            </div>
+          </div>
 
           {errorMsg && (
             <p role="alert" className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">

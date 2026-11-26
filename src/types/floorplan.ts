@@ -1,6 +1,36 @@
 export type UnitType = 'cm' | 'm' | 'mm';
 
-export type ElementKind = 'door' | 'cabinet' | 'window' | 'table' | 'chair' | 'bed';
+export type ElementKind =
+  | 'door'
+  | 'window'
+  | 'cabinet'
+  | 'wall_cabinet'
+  | 'kitchen_counter'
+  | 'table'
+  | 'round_table'
+  | 'chair'
+  | 'sofa'
+  | 'bed'
+  | 'bed_curtain'
+  | 'toilet'
+  | 'urinal'
+  | 'shower'
+  | 'sink';
+
+export type ElementCategoryId =
+  | 'opening'
+  | 'furniture'
+  | 'storage'
+  | 'bathroom'
+  | 'medical';
+
+export interface SnapGuideLine {
+  axis: 'x' | 'y';
+  positionCm: number;
+  startCm: number;
+  endCm: number;
+  reason: 'wall' | 'element' | 'center';
+}
 
 export type ElementPlacementMode = 'wall' | 'free';
 
@@ -16,7 +46,31 @@ export type DoorSwing =
   | 'sliding-outward-left'
   | 'sliding-outward-right';
 
-export type ViewMode = '2d' | '3d' | 'split' | 'elevation';
+export interface FloorplanLayer {
+  id: string;
+  name: string;
+  visible: boolean;
+  /** Optional uniform hex color applied to elements on this layer unless overridden per element */
+  color?: string;
+}
+
+export type QuoteSurfaceTarget = 'ceiling' | 'wall' | 'floor' | 'element' | 'custom';
+
+export type QuoteAreaUnit = 'm2' | 'ping' | 'm' | 'pcs';
+
+export interface QuoteLineItem {
+  id: string;
+  target: QuoteSurfaceTarget;
+  linkedElementId?: string;
+  itemName: string;
+  specNote?: string;
+  unit: QuoteAreaUnit;
+  quantity: number;
+  manualQuantity?: boolean;
+  unitPrice: number;
+}
+
+export type ViewMode = '2d' | '3d' | 'split' | 'elevation' | 'quote';
 
 export type CameraPreset = 'iso' | 'top' | 'interior' | 'reset';
 
@@ -74,6 +128,10 @@ export interface FloorplanElement {
   showClearance?: boolean;
   /** Show distance callouts from all 4 sides of this item to surrounding walls in 2D */
   showWallDistances?: boolean;
+  /** Optional custom hex color override (e.g. #d9b382) */
+  color?: string;
+  /** Layer identifier for batch visibility & uniform layer coloring */
+  layerId?: string;
 }
 
 export interface SectionLine {
@@ -99,6 +157,10 @@ export interface FloorplanProject {
   interiorWalls?: InteriorWall[];
   elements: FloorplanElement[];
   sectionLines?: SectionLine[];
+  wallColor?: string;
+  floorColor?: string;
+  layers?: FloorplanLayer[];
+  quoteItems?: QuoteLineItem[];
   analysisNotes?: string;
 }
 
@@ -256,11 +318,14 @@ export interface ElevationWallItem {
   sStartCm: number;
   sEndCm: number;
   depthCm: number;
+  dStartCm?: number;
+  dEndCm?: number;
   heightCm: number;
 }
 
 export interface ElevationOpeningItem {
   elementId: string;
+  hostWallId?: string;
   kind: 'door' | 'window';
   name: string;
   swingDirection?: DoorSwing;
@@ -268,23 +333,53 @@ export interface ElevationOpeningItem {
   slideSignInView?: 1 | -1;
   sStartCm: number;
   sEndCm: number;
+  visibleSStartCm?: number;
+  visibleSEndCm?: number;
+  dimSStartCm?: number;
+  dimSEndCm?: number;
   projectedWidthCm: number;
   actualWidthCm: number;
   elevationCm: number;
   heightCm: number;
   depthCm: number;
+  color?: string;
 }
 
 export interface ElevationFurnitureItem {
   elementId: string;
-  kind: 'cabinet' | 'table' | 'chair' | 'bed';
+  kind: Exclude<ElementKind, 'door' | 'window'>;
   name: string;
   sStartCm: number;
   sEndCm: number;
+  visibleSStartCm?: number;
+  visibleSEndCm?: number;
   elevationCm: number;
   heightCm: number;
   depthCm: number;
+  color?: string;
 }
+
+export type ElevationRenderItem =
+  | {
+      kind: 'wall';
+      renderDepthCm: number;
+      priority: 0;
+      wall: ElevationWallItem;
+      wallIndex: number;
+    }
+  | {
+      kind: 'opening';
+      renderDepthCm: number;
+      priority: 1;
+      opening: ElevationOpeningItem;
+      openingIndex: number;
+    }
+  | {
+      kind: 'furniture';
+      renderDepthCm: number;
+      priority: 2;
+      furniture: ElevationFurnitureItem;
+    };
 
 export interface SolvedElevation {
   sectionLine: SectionLine;
@@ -296,5 +391,6 @@ export interface SolvedElevation {
   openings: ElevationOpeningItem[];
   furniture: ElevationFurnitureItem[];
 }
+
 
 
