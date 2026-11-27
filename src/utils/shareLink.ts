@@ -13,6 +13,11 @@ import type {
   WallEdge,
 } from '../types/floorplan';
 import { ALL_DOOR_SWINGS, sanitizeHexColor } from './floorplanGeometry';
+import {
+  isCabinetElementKind,
+  resolveCabinetBaseKind,
+  sanitizeCabinetSpec,
+} from './cabinetDesigner';
 
 const ALLOWED_QUOTE_TARGETS = new Set<QuoteSurfaceTarget>([
   'ceiling',
@@ -39,6 +44,10 @@ const ALLOWED_KINDS = new Set<ElementKind>([
   'urinal',
   'shower',
   'sink',
+  'panel_light',
+  'track_light',
+  'recessed_light',
+  'wall_sconce',
 ]);
 const ALLOWED_SWING_SET = new Set<DoorSwing>(ALL_DOOR_SWINGS);
 
@@ -184,6 +193,19 @@ export function sanitizeSharedProject(raw: unknown): FloorplanProject | null {
             ...(sanitizeHexColor(el.color) ? { color: sanitizeHexColor(el.color) } : {}),
             ...(typeof el.layerId === 'string' && el.layerId.trim()
               ? { layerId: clampString(el.layerId, '', 64) }
+              : {}),
+            ...(typeof el.lightOn === 'boolean' ? { lightOn: el.lightOn } : {}),
+            ...(isCabinetElementKind(kind) && el.cabinetSpec && typeof el.cabinetSpec === 'object'
+              ? {
+                  cabinetSpec: sanitizeCabinetSpec(
+                    el.cabinetSpec,
+                    resolveCabinetBaseKind(kind),
+                    Math.max(5, Math.min(5000, finiteOr(el.widthCm, 90)))
+                  ),
+                }
+              : {}),
+            ...(typeof el.customCabinetId === 'string' && el.customCabinetId.trim()
+              ? { customCabinetId: clampString(el.customCabinetId, '', 80) }
               : {}),
           };
         })

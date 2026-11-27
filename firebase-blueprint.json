@@ -283,6 +283,92 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "CustomCabinetDocument": {
+      "title": "CustomCabinetDocument",
+      "description": "Reusable custom cabinet component template designed by the user.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Custom cabinet template ID",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Cabinet template display name",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "baseKind": {
+          "type": "string",
+          "enum": ["cabinet", "wall_cabinet", "kitchen_counter"],
+          "description": "Base element kind"
+        },
+        "widthCm": {
+          "type": "number",
+          "description": "Width in cm (20 to 600)"
+        },
+        "depthCm": {
+          "type": "number",
+          "description": "Depth in cm (15 to 200)"
+        },
+        "heightCm": {
+          "type": "number",
+          "description": "Height in cm (20 to 350)"
+        },
+        "elevationCm": {
+          "type": "number",
+          "description": "Bottom elevation off floor in cm (0 to 300)"
+        },
+        "defaultPlacement": {
+          "type": "string",
+          "enum": ["wall", "free"],
+          "description": "Default placement mode when inserted"
+        },
+        "color": {
+          "type": "string",
+          "description": "Optional hex cabinet finish color",
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "cabinetSpec": {
+          "type": "object",
+          "description": "Cabinet interior and door/drawer hardware specification (drawerCount 0..6, doorMode, shelfCount 0..8, hasHangingRod, hasSink)"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "name",
+        "baseKind",
+        "widthCm",
+        "depthCm",
+        "heightCm",
+        "elevationCm",
+        "defaultPlacement",
+        "cabinetSpec",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -297,6 +383,12 @@
         "$ref": "#/entities/FloorplanDocument"
       },
       "description": "User-owned cloud-persisted floorplan projects."
+    },
+    "/users/{userId}/custom_cabinets/{cabinetId}": {
+      "schema": {
+        "$ref": "#/entities/CustomCabinetDocument"
+      },
+      "description": "User-owned reusable custom cabinet library templates."
     },
     "/shared_floorplans/{shareId}": {
       "schema": {

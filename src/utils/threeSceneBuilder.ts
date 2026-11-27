@@ -19,6 +19,14 @@ import {
   computeOpeningBadgePosition,
   computeWallDimensionLayout,
 } from './threeDimensionLayout';
+import {
+  applyCabinetPartProgress,
+  buildInteractiveCabinetMesh,
+  type CabinetInteractivePartHandle,
+} from './cabinet3DBuilder';
+import { resolveCabinetSpecForElement } from './cabinetDesigner';
+
+export { applyCabinetPartProgress, type CabinetInteractivePartHandle };
 
 export const CM_TO_M = 0.01;
 
@@ -184,6 +192,96 @@ function createDimensionBadgeSprite(
   return sprite;
 }
 
+export interface DoorSceneHandle {
+  elementId: string;
+  mode: 'swing' | 'sliding';
+  pivot?: THREE.Group;
+  closedAngleRad?: number;
+  openAngleRad?: number;
+  slidingPanel?: THREE.Mesh;
+  pullHandle?: THREE.Mesh;
+  hangers?: Array<{ mesh: THREE.Mesh; offsetX: number }>;
+  closedPanelX?: number;
+  openPanelX?: number;
+  handleOffsetX?: number;
+  currentProgress: number;
+}
+
+export interface CurtainSceneHandle {
+  elementId: string;
+  leftGroup: THREE.Group;
+  frontGroup: THREE.Group;
+  currentProgress: number;
+}
+
+export interface RoomSceneHandles {
+  doors: DoorSceneHandle[];
+  curtains: CurtainSceneHandle[];
+  cabinetParts: CabinetInteractivePartHandle[];
+  interactableMeshes: THREE.Object3D[];
+  ceilingMesh?: THREE.Mesh;
+  activeDynamicLightCount: number;
+  hasAnyLightFixture: boolean;
+}
+
+export function applyRoomCeilingVisibility(
+  handles: RoomSceneHandles,
+  showCeiling: boolean,
+  solidCeiling: boolean,
+  isSoftwareGl: boolean,
+  enableLightingRender: boolean
+): void {
+  const ceilMesh = handles.ceilingMesh;
+  if (!ceilMesh) return;
+  if (!showCeiling && !solidCeiling) {
+    ceilMesh.visible = false;
+    return;
+  }
+  ceilMesh.visible = true;
+  ceilMesh.receiveShadow = !isSoftwareGl && enableLightingRender;
+  ceilMesh.renderOrder = solidCeiling ? 0 : 3;
+  const mat = ceilMesh.material as THREE.MeshStandardMaterial;
+  mat.color.setHex(solidCeiling ? 0xf8fafc : 0xf1f5f9);
+  const nextTransparent = !solidCeiling;
+  if (mat.transparent !== nextTransparent) {
+    mat.transparent = nextTransparent;
+    mat.needsUpdate = true;
+  }
+  mat.opacity = solidCeiling ? 1.0 : 0.34;
+  mat.depthWrite = solidCeiling;
+}
+
+export function applyDoorOpenProgress(handle: DoorSceneHandle, progress: number): void {
+  const p = Math.max(0, Math.min(1, progress));
+  handle.currentProgress = p;
+  if (handle.mode === 'swing' && handle.pivot) {
+    handle.pivot.rotation.y = THREE.MathUtils.lerp(
+      handle.closedAngleRad ?? 0,
+      handle.openAngleRad ?? 0,
+      p
+    );
+  } else if (handle.mode === 'sliding' && handle.slidingPanel) {
+    const panelX = THREE.MathUtils.lerp(handle.closedPanelX ?? 0, handle.openPanelX ?? 0, p);
+    handle.slidingPanel.position.x = panelX;
+    if (handle.pullHandle && handle.handleOffsetX !== undefined) {
+      handle.pullHandle.position.x = panelX + handle.handleOffsetX;
+    }
+    if (handle.hangers) {
+      for (const h of handle.hangers) {
+        h.mesh.position.x = panelX + h.offsetX;
+      }
+    }
+  }
+}
+
+export function applyCurtainOpenProgress(handle: CurtainSceneHandle, progress: number): void {
+  const p = Math.max(0, Math.min(1, progress));
+  handle.currentProgress = p;
+  const scaleSpan = THREE.MathUtils.lerp(1.0, 0.14, p);
+  handle.leftGroup.scale.z = scaleSpan;
+  handle.frontGroup.scale.x = scaleSpan;
+}
+
 export interface BuildRoomSceneOptions {
   project: FloorplanProject;
   solved: SolvedFloorplan;
@@ -192,8 +290,12 @@ export interface BuildRoomSceneOptions {
   selectedElementId: string | null;
   wallTransparent: boolean;
   showCeiling: boolean;
+  solidCeiling?: boolean;
   showWireframe: boolean;
   showDimensions: boolean;
+  enableLightingRender?: boolean;
+  openElementIds?: Record<string, boolean>;
+  openCabinetParts?: Record<string, boolean>;
   isSoftwareGl: boolean;
   floorTexture: THREE.Texture | null;
 }
@@ -201,7 +303,7 @@ export interface BuildRoomSceneOptions {
 export function buildRoomSceneGroup(
   roomGroup: THREE.Group,
   options: BuildRoomSceneOptions
-): void {
+): RoomSceneHandles {
   const {
     project,
     solved,
@@ -210,13 +312,26 @@ export function buildRoomSceneGroup(
     selectedElementId,
     wallTransparent,
     showCeiling,
+    solidCeiling = false,
     showWireframe,
     showDimensions,
+    enableLightingRender = true,
+    openElementIds = {},
+    openCabinetParts = {},
     isSoftwareGl,
     floorTexture,
   } = options;
 
   disposeGroupContents(roomGroup, floorTexture);
+
+  const handles: RoomSceneHandles = {
+    doors: [],
+    curtains: [],
+    cabinetParts: [],
+    interactableMeshes: [],
+    activeDynamicLightCount: 0,
+    hasAnyLightFixture: false,
+  };
 
   const ceilingM = Math.max(1.2, project.ceilingHeightCm * CM_TO_M);
   const wallThickM = Math.max(0.06, project.wallThicknessCm * CM_TO_M);
@@ -280,23 +395,28 @@ export function buildRoomSceneGroup(
     floorMesh.receiveShadow = !isSoftwareGl;
     roomGroup.add(floorMesh);
 
-    if (showCeiling) {
-      const ceilGeo = new THREE.ShapeGeometry(shape);
-      const ceilMat = new THREE.MeshStandardMaterial({
-        color: 0xf1f5f9,
-        roughness: 0.9,
-        metalness: 0.0,
-        transparent: true,
-        opacity: 0.32,
-        side: THREE.DoubleSide,
-        depthWrite: false,
-      });
-      const ceilMesh = new THREE.Mesh(ceilGeo, ceilMat);
-      ceilMesh.rotation.x = -Math.PI / 2;
-      ceilMesh.position.y = ceilingM + 0.005;
-      ceilMesh.renderOrder = 3;
-      roomGroup.add(ceilMesh);
-    }
+    const ceilGeo = new THREE.ShapeGeometry(shape);
+    const ceilMat = new THREE.MeshStandardMaterial({
+      color: solidCeiling ? 0xf8fafc : 0xf1f5f9,
+      roughness: 0.9,
+      metalness: 0.0,
+      transparent: !solidCeiling,
+      opacity: solidCeiling ? 1.0 : 0.34,
+      side: THREE.DoubleSide,
+      depthWrite: solidCeiling,
+    });
+    const ceilMesh = new THREE.Mesh(ceilGeo, ceilMat);
+    ceilMesh.rotation.x = -Math.PI / 2;
+    ceilMesh.position.y = ceilingM + 0.004;
+    roomGroup.add(ceilMesh);
+    handles.ceilingMesh = ceilMesh;
+    applyRoomCeilingVisibility(
+      handles,
+      showCeiling,
+      solidCeiling,
+      isSoftwareGl,
+      enableLightingRender
+    );
   }
 
   // Group openings per wall segment
@@ -365,7 +485,7 @@ export function buildRoomSceneGroup(
     const wallLenM = se.lengthCm * CM_TO_M;
     const isSelected = selectedEdgeId === se.id;
     const openings = (openingsByEdge.get(se.id) || []).sort(
-      (a, b) => a.startM - a.startM
+      (a, b) => a.startM - b.startM
     );
 
     let cursor = 0;
@@ -543,8 +663,8 @@ export function buildRoomSceneGroup(
         })
       : null;
     const wM = pl.clampedWidthCm * CM_TO_M;
-    const dM = Math.max(0.06, element.depthCm * CM_TO_M);
-    const hM = Math.min(ceilingM, Math.max(0.2, element.heightCm * CM_TO_M));
+    const dM = Math.max(0.02, element.depthCm * CM_TO_M);
+    const hM = Math.min(ceilingM, Math.max(0.04, element.heightCm * CM_TO_M));
     const elevM = Math.max(0, element.elevationCm * CM_TO_M);
 
     if (element.kind === 'door') {
@@ -601,12 +721,14 @@ export function buildRoomSceneGroup(
       const leafW = Math.max(0.2, wM - jambT * 2);
       const leafH = Math.max(0.4, hM - jambT - 0.02);
 
+      const initProgress = openElementIds[element.id] ? 1 : 0;
+
       if (doorMode === 'sliding') {
-        // Architectural Sliding Door (內橫拉 / 外橫拉): rail & rollers mounted on target face + partially slid door panel
+        // Architectural Sliding Door (內橫拉 / 外橫拉): rail & rollers mounted on target face + animatable door panel
         const slideSign = isRight ? 1 : -1;
         const trackOffsetZ = swingDirLocalZ * (jambDepth * 0.5 + 0.036);
-        const railLen = wM * 1.65;
-        const railCenterX = slideSign * wM * 0.34;
+        const railLen = wM * 1.9;
+        const railCenterX = slideSign * wM * 0.45;
         const railY = hM + 0.045;
 
         const railBar = new THREE.Mesh(
@@ -617,47 +739,63 @@ export function buildRoomSceneGroup(
         doorGroup.add(railBar);
 
         const panelW = wM + 0.04;
-        const panelCenterX = slideSign * (wM * 0.52);
+        const closedPanelX = 0;
+        const openPanelX = slideSign * (wM * 0.92);
 
-        // Dual overhead roller hangers
+        const hangers: Array<{ mesh: THREE.Mesh; offsetX: number }> = [];
         for (const rxOff of [-panelW * 0.32, panelW * 0.32]) {
           const hanger = new THREE.Mesh(
             new THREE.BoxGeometry(0.032, 0.075, 0.026),
             metalMat
           );
-          hanger.position.set(panelCenterX + rxOff, hM + 0.015, trackOffsetZ);
+          hanger.position.set(closedPanelX + rxOff, hM + 0.015, trackOffsetZ);
           doorGroup.add(hanger);
+          hangers.push({ mesh: hanger, offsetX: rxOff });
         }
 
         const slidingPanel = new THREE.Mesh(
           new THREE.BoxGeometry(panelW, leafH + 0.02, 0.042),
           useSelectTint ? selectedAccentMat : customMat ?? doorLeafMat
         );
-        slidingPanel.position.set(panelCenterX, (leafH + 0.02) * 0.5 + 0.01, trackOffsetZ);
+        slidingPanel.position.set(closedPanelX, (leafH + 0.02) * 0.5 + 0.01, trackOffsetZ);
         slidingPanel.castShadow = !isSoftwareGl;
+        slidingPanel.userData.spaceInteractElementId = element.id;
         doorGroup.add(slidingPanel);
+        handles.interactableMeshes.push(slidingPanel);
 
-        // Vertical recessed pull handle on leading edge facing the opening
+        const handleOffsetX = -slideSign * (panelW * 0.5 - 0.08);
         const pullHandle = new THREE.Mesh(
           new THREE.BoxGeometry(0.026, 0.22, 0.056),
           metalMat
         );
         pullHandle.position.set(
-          panelCenterX - slideSign * (panelW * 0.5 - 0.08),
+          closedPanelX + handleOffsetX,
           Math.min(1.05, leafH * 0.48),
           trackOffsetZ
         );
+        pullHandle.userData.spaceInteractElementId = element.id;
         doorGroup.add(pullHandle);
+        handles.interactableMeshes.push(pullHandle);
+
+        const doorHandle: DoorSceneHandle = {
+          elementId: element.id,
+          mode: 'sliding',
+          slidingPanel,
+          pullHandle,
+          hangers,
+          closedPanelX,
+          openPanelX,
+          handleOffsetX,
+          currentProgress: initProgress,
+        };
+        applyDoorOpenProgress(doorHandle, initProgress);
+        handles.doors.push(doorHandle);
       } else {
         const pivot = new THREE.Group();
-        pivot.position.set(
-          isRight ? wM * 0.5 - jambT : -wM * 0.5 + jambT,
-          0.015,
-          0
-        );
-        // Right-handed +Y rotation: (-X) leaf maps to +Z for +angle; (+X) leaf maps to +Z for -angle
-        const swingAngle = (isRight ? 1 : -1) * swingDirLocalZ * 0.62;
-        pivot.rotation.y = swingAngle;
+        const hingeX = isRight ? wM * 0.5 - jambT : -wM * 0.5 + jambT;
+        pivot.position.set(hingeX, 0.015, 0);
+        const closedAngleRad = 0;
+        const openAngleRad = (isRight ? 1 : -1) * swingDirLocalZ * 1.48;
 
         const leafMesh = new THREE.Mesh(
           new THREE.BoxGeometry(leafW, leafH, 0.042),
@@ -665,7 +803,9 @@ export function buildRoomSceneGroup(
         );
         leafMesh.position.set(isRight ? -leafW * 0.5 : leafW * 0.5, leafH * 0.5, 0);
         leafMesh.castShadow = !isSoftwareGl;
+        leafMesh.userData.spaceInteractElementId = element.id;
         pivot.add(leafMesh);
+        handles.interactableMeshes.push(leafMesh);
 
         const handle = new THREE.Mesh(
           new THREE.BoxGeometry(0.11, 0.024, 0.085),
@@ -676,9 +816,38 @@ export function buildRoomSceneGroup(
           Math.min(1.02, leafH * 0.48),
           0
         );
+        handle.userData.spaceInteractElementId = element.id;
         pivot.add(handle);
+        handles.interactableMeshes.push(handle);
 
         doorGroup.add(pivot);
+
+        // Subtle architectural floor swing arc indicator
+        const arcPts: THREE.Vector3[] = [];
+        const arcSegs = 16;
+        for (let i = 0; i <= arcSegs; i++) {
+          const theta = (i / arcSegs) * (Math.PI * 0.5);
+          const lx = hingeX + (isRight ? -leafW * Math.cos(theta) : leafW * Math.cos(theta));
+          const lz = swingDirLocalZ * leafW * Math.sin(theta);
+          arcPts.push(new THREE.Vector3(lx, 0.008, lz));
+        }
+        const arcGeo = new THREE.BufferGeometry().setFromPoints(arcPts);
+        const arcLine = new THREE.Line(
+          arcGeo,
+          new THREE.LineBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.45 })
+        );
+        doorGroup.add(arcLine);
+
+        const doorHandle: DoorSceneHandle = {
+          elementId: element.id,
+          mode: 'swing',
+          pivot,
+          closedAngleRad,
+          openAngleRad,
+          currentProgress: initProgress,
+        };
+        applyDoorOpenProgress(doorHandle, initProgress);
+        handles.doors.push(doorHandle);
       }
       roomGroup.add(doorGroup);
     } else if (element.kind === 'window') {
@@ -1099,74 +1268,59 @@ export function buildRoomSceneGroup(
       }
 
       roomGroup.add(bedGroup);
-    } else if (element.kind === 'wall_cabinet') {
-      const wcGroup = new THREE.Group();
+    } else if (
+      element.kind === 'wall_cabinet' ||
+      element.kind === 'kitchen_counter' ||
+      element.kind === 'cabinet'
+    ) {
       const normalDir = pl.facingNormal;
-      wcGroup.position.set(pl.boxCenter.x * CM_TO_M, elevM, pl.boxCenter.y * CM_TO_M);
-      wcGroup.rotation.y = Math.atan2(normalDir.x, normalDir.y);
+      const spec = resolveCabinetSpecForElement(element);
+      const { group: cabGroup, parts, interactableMeshes } = buildInteractiveCabinetMesh({
+        elementId: element.id,
+        elementName: element.name,
+        baseKind: element.kind,
+        widthCm: pl.clampedWidthCm,
+        depthCm: element.depthCm,
+        heightCm: element.heightCm,
+        spec,
+        materials: {
+          bodyMat: useSelectTint ? selectedAccentMat : customMat ?? cabBodyMat,
+          interiorMat: cabBodyMat,
+          doorMat: useSelectTint ? selectedAccentMat : customDarkMat ?? cabDoorMat,
+          plinthMat: cabPlinthMat,
+          metalMat,
+          countertopMat: useSelectTint
+            ? selectedAccentMat
+            : customMat && element.kind !== 'kitchen_counter'
+              ? customMat
+              : countertopStoneMat,
+          waterMat: waterAccentMat,
+          cooktopMat: cooktopGlassMat,
+          edgeLineMat: wallEdgeLineMat,
+        },
+        showWireframe,
+        includeCooktopIfKitchenDefault:
+          element.kind === 'kitchen_counter' && !element.cabinetSpec,
+        castShadow: !isSoftwareGl,
+        receiveShadow: !isSoftwareGl,
+        openPartsMap: openCabinetParts,
+      });
 
-      const trimH = 0.022;
-      const bodyH = Math.max(0.16, hM - trimH * 2);
+      cabGroup.position.set(pl.boxCenter.x * CM_TO_M, elevM, pl.boxCenter.y * CM_TO_M);
+      cabGroup.rotation.y = Math.atan2(normalDir.x, normalDir.y);
 
-      const bottomTrim = new THREE.Mesh(
-        new THREE.BoxGeometry(wM, trimH, dM),
-        useSelectTint ? selectedAccentMat : customDarkMat ?? cabDoorMat
-      );
-      bottomTrim.position.set(0, trimH * 0.5, 0);
-      wcGroup.add(bottomTrim);
-
-      const body = new THREE.Mesh(
-        new THREE.BoxGeometry(wM, bodyH, dM - 0.022),
-        useSelectTint ? selectedAccentMat : customMat ?? cabBodyMat
-      );
-      body.position.set(0, trimH + bodyH * 0.5, -0.011);
-      body.castShadow = !isSoftwareGl;
-      body.receiveShadow = !isSoftwareGl;
-      wcGroup.add(body);
-
-      const topTrim = new THREE.Mesh(
-        new THREE.BoxGeometry(wM + 0.008, trimH, dM + 0.006),
-        useSelectTint ? selectedAccentMat : customDarkMat ?? cabDoorMat
-      );
-      topTrim.position.set(0, trimH + bodyH + trimH * 0.5, 0);
-      wcGroup.add(topTrim);
-
-      const numDoors = wM > 0.75 ? 2 : 1;
-      const doorGap = 0.012;
-      const singleDoorW = (wM - doorGap * (numDoors + 1)) / numDoors;
-      for (let dIdx = 0; dIdx < numDoors; dIdx++) {
-        const dx = -wM * 0.5 + doorGap + singleDoorW * 0.5 + dIdx * (singleDoorW + doorGap);
-        const doorPanel = new THREE.Mesh(
-          new THREE.BoxGeometry(singleDoorW, bodyH - 0.014, 0.02),
-          useSelectTint ? selectedAccentMat : customDarkMat ?? cabDoorMat
+      if (isSelected && customHex) {
+        const selOutline = new THREE.LineSegments(
+          new THREE.EdgesGeometry(new THREE.BoxGeometry(wM + 0.03, hM + 0.03, dM + 0.03)),
+          selectionEdgeMat
         );
-        doorPanel.position.set(dx, trimH + bodyH * 0.5, dM * 0.5 - 0.01);
-        wcGroup.add(doorPanel);
-
-        const handleOffset =
-          numDoors === 2
-            ? dIdx === 0
-              ? singleDoorW * 0.34
-              : -singleDoorW * 0.34
-            : -singleDoorW * 0.34;
-        const handle = new THREE.Mesh(
-          new THREE.BoxGeometry(0.014, Math.min(0.18, bodyH * 0.32), 0.02),
-          metalMat
-        );
-        handle.position.set(dx + handleOffset, trimH + Math.min(0.14, bodyH * 0.25), dM * 0.5 + 0.008);
-        wcGroup.add(handle);
+        selOutline.position.set(0, hM * 0.5, 0);
+        cabGroup.add(selOutline);
       }
 
-      if (showWireframe) {
-        const outline = new THREE.LineSegments(
-          new THREE.EdgesGeometry(new THREE.BoxGeometry(wM, hM, dM), 20),
-          wallEdgeLineMat
-        );
-        outline.position.set(0, hM * 0.5, 0);
-        wcGroup.add(outline);
-      }
-
-      roomGroup.add(wcGroup);
+      handles.cabinetParts.push(...parts);
+      handles.interactableMeshes.push(...interactableMeshes);
+      roomGroup.add(cabGroup);
     } else if (element.kind === 'toilet') {
       const toiletGroup = new THREE.Group();
       const normalDir = pl.facingNormal;
@@ -1420,51 +1574,63 @@ export function buildRoomSceneGroup(
       const bodyH = Math.max(0.2, topLocalY - meshBandH);
       const activeFabric = useSelectTint ? selectedAccentMat : customMat ?? curtainFabricMat;
 
-      // Left arm (along Z at x = -wM/2 + 0.018) and front arm (along X at z = +dM/2 - 0.018)
+      // Left arm anchored at head-wall end (z = -dM/2) and front arm anchored at right end (x = +wM/2)
       const leftX = -wM * 0.5 + 0.018;
       const frontZ = dM * 0.5 - 0.018;
 
+      const leftGroup = new THREE.Group();
+      leftGroup.position.set(leftX, 0, -dM * 0.5);
+
       const leftBody = new THREE.Mesh(new THREE.BoxGeometry(0.02, bodyH, dM), activeFabric);
-      leftBody.position.set(leftX, bodyH * 0.5, 0);
+      leftBody.position.set(0, bodyH * 0.5, dM * 0.5);
       leftBody.castShadow = !isSoftwareGl;
-      curtainGroup.add(leftBody);
+      leftBody.userData.spaceInteractElementId = element.id;
+      leftGroup.add(leftBody);
+      handles.interactableMeshes.push(leftBody);
 
       const leftTopMesh = new THREE.Mesh(
         new THREE.BoxGeometry(0.014, meshBandH, dM),
         curtainMeshTopMat
       );
-      leftTopMesh.position.set(leftX, bodyH + meshBandH * 0.5, 0);
-      curtainGroup.add(leftTopMesh);
+      leftTopMesh.position.set(0, bodyH + meshBandH * 0.5, dM * 0.5);
+      leftGroup.add(leftTopMesh);
+
+      const zPleatCount = Math.max(3, Math.floor(dM / 0.3));
+      for (let i = 1; i < zPleatCount; i++) {
+        const pz = (i / zPleatCount) * dM;
+        const rib = new THREE.Mesh(new THREE.BoxGeometry(0.034, bodyH, 0.014), activeFabric);
+        rib.position.set(0, bodyH * 0.5, pz);
+        leftGroup.add(rib);
+      }
+      curtainGroup.add(leftGroup);
+
+      const frontGroup = new THREE.Group();
+      frontGroup.position.set(wM * 0.5, 0, frontZ);
 
       const frontBody = new THREE.Mesh(new THREE.BoxGeometry(wM, bodyH, 0.02), activeFabric);
-      frontBody.position.set(0, bodyH * 0.5, frontZ);
+      frontBody.position.set(-wM * 0.5, bodyH * 0.5, 0);
       frontBody.castShadow = !isSoftwareGl;
-      curtainGroup.add(frontBody);
+      frontBody.userData.spaceInteractElementId = element.id;
+      frontGroup.add(frontBody);
+      handles.interactableMeshes.push(frontBody);
 
       const frontTopMesh = new THREE.Mesh(
         new THREE.BoxGeometry(wM, meshBandH, 0.014),
         curtainMeshTopMat
       );
-      frontTopMesh.position.set(0, bodyH + meshBandH * 0.5, frontZ);
-      curtainGroup.add(frontTopMesh);
+      frontTopMesh.position.set(-wM * 0.5, bodyH + meshBandH * 0.5, 0);
+      frontGroup.add(frontTopMesh);
 
-      // Subtle vertical pleat ribs along both curtain faces for architectural texture
-      const zPleatCount = Math.max(3, Math.floor(dM / 0.3));
-      for (let i = 1; i < zPleatCount; i++) {
-        const pz = -dM * 0.5 + (i / zPleatCount) * dM;
-        const rib = new THREE.Mesh(new THREE.BoxGeometry(0.034, bodyH, 0.014), activeFabric);
-        rib.position.set(leftX, bodyH * 0.5, pz);
-        curtainGroup.add(rib);
-      }
       const xPleatCount = Math.max(3, Math.floor(wM / 0.3));
       for (let i = 1; i < xPleatCount; i++) {
-        const px = -wM * 0.5 + (i / xPleatCount) * wM;
+        const px = -wM + (i / xPleatCount) * wM;
         const rib = new THREE.Mesh(new THREE.BoxGeometry(0.014, bodyH, 0.034), activeFabric);
-        rib.position.set(px, bodyH * 0.5, frontZ);
-        curtainGroup.add(rib);
+        rib.position.set(px, bodyH * 0.5, 0);
+        frontGroup.add(rib);
       }
+      curtainGroup.add(frontGroup);
 
-      // Metallic L-shaped ceiling track & suspension hangers to ceiling
+      // Metallic L-shaped ceiling track & suspension hangers to ceiling (remain stationary)
       const trackLeft = new THREE.Mesh(new THREE.BoxGeometry(0.032, 0.028, dM + 0.02), metalMat);
       trackLeft.position.set(leftX, topLocalY, 0);
       curtainGroup.add(trackLeft);
@@ -1487,228 +1653,178 @@ export function buildRoomSceneGroup(
         }
       }
 
+      const curtainHandle: CurtainSceneHandle = {
+        elementId: element.id,
+        leftGroup,
+        frontGroup,
+        currentProgress: openElementIds[element.id] ? 1 : 0,
+      };
+      applyCurtainOpenProgress(curtainHandle, curtainHandle.currentProgress);
+      handles.curtains.push(curtainHandle);
+
       roomGroup.add(curtainGroup);
-    } else if (element.kind === 'kitchen_counter') {
-      const kcGroup = new THREE.Group();
+    } else if (
+      element.kind === 'panel_light' ||
+      element.kind === 'track_light' ||
+      element.kind === 'recessed_light' ||
+      element.kind === 'wall_sconce'
+    ) {
+      handles.hasAnyLightFixture = true;
+      const isOn = element.lightOn !== false;
+      const lampGroup = new THREE.Group();
       const normalDir = pl.facingNormal;
-      kcGroup.position.set(pl.boxCenter.x * CM_TO_M, elevM, pl.boxCenter.y * CM_TO_M);
-      kcGroup.rotation.y = Math.atan2(normalDir.x, normalDir.y);
+      const clampedElevM =
+        element.kind === 'wall_sconce'
+          ? Math.min(Math.max(0.2, elevM), Math.max(0.2, ceilingM - hM))
+          : Math.min(elevM, Math.max(0.4, ceilingM - hM));
+      lampGroup.position.set(pl.boxCenter.x * CM_TO_M, clampedElevM, pl.boxCenter.y * CM_TO_M);
+      lampGroup.rotation.y = Math.atan2(normalDir.x, normalDir.y);
 
-      const plinthH = 0.09;
-      const topH = 0.04;
-      const bodyH = Math.max(0.25, hM - plinthH - topH);
-      const activeBody = useSelectTint ? selectedAccentMat : customMat ?? cabBodyMat;
-      const activeDoor = useSelectTint ? selectedAccentMat : customDarkMat ?? cabDoorMat;
+      const housingMat = useSelectTint
+        ? selectedAccentMat
+        : customDarkMat ??
+          new THREE.MeshStandardMaterial({
+            color: element.kind === 'track_light' ? 0x1e293b : 0xf1f5f9,
+            roughness: 0.42,
+            metalness: element.kind === 'track_light' ? 0.55 : 0.15,
+          });
+      const diffuserMat = new THREE.MeshStandardMaterial({
+        color: isOn ? (customHex || 0xfffbeb) : 0x94a3b8,
+        emissive: isOn ? 0xffe4a0 : 0x000000,
+        emissiveIntensity: isOn ? (enableLightingRender ? 1.85 : 0.95) : 0,
+        roughness: 0.25,
+        metalness: 0.0,
+      });
 
-      const plinth = new THREE.Mesh(
-        new THREE.BoxGeometry(wM - 0.02, plinthH, dM - 0.05),
-        cabPlinthMat
-      );
-      plinth.position.set(0, plinthH * 0.5, -0.02);
-      kcGroup.add(plinth);
+      if (element.kind === 'panel_light') {
+        const frame = new THREE.Mesh(new THREE.BoxGeometry(wM, hM, dM), housingMat);
+        frame.position.set(0, hM * 0.5, 0);
+        lampGroup.add(frame);
 
-      const carcass = new THREE.Mesh(
-        new THREE.BoxGeometry(wM, bodyH, dM - 0.03),
-        activeBody
-      );
-      carcass.position.set(0, plinthH + bodyH * 0.5, -0.015);
-      carcass.castShadow = !isSoftwareGl;
-      carcass.receiveShadow = !isSoftwareGl;
-      kcGroup.add(carcass);
-
-      const counterSlab = new THREE.Mesh(
-        new THREE.BoxGeometry(wM + 0.015, topH, dM + 0.015),
-        useSelectTint ? selectedAccentMat : countertopStoneMat
-      );
-      counterSlab.position.set(0, plinthH + bodyH + topH * 0.5, 0);
-      counterSlab.castShadow = !isSoftwareGl;
-      counterSlab.receiveShadow = !isSoftwareGl;
-      kcGroup.add(counterSlab);
-
-      const backsplash = new THREE.Mesh(
-        new THREE.BoxGeometry(wM + 0.015, 0.08, 0.022),
-        useSelectTint ? selectedAccentMat : countertopStoneMat
-      );
-      backsplash.position.set(0, hM + 0.04, -dM * 0.5 + 0.005);
-      kcGroup.add(backsplash);
-
-      const numDoors = Math.max(2, Math.round(wM / 0.55));
-      const doorGap = 0.012;
-      const singleDoorW = (wM - doorGap * (numDoors + 1)) / numDoors;
-      for (let i = 0; i < numDoors; i++) {
-        const dx = -wM * 0.5 + doorGap + singleDoorW * 0.5 + i * (singleDoorW + doorGap);
-        const door = new THREE.Mesh(
-          new THREE.BoxGeometry(singleDoorW, bodyH - 0.024, 0.02),
-          activeDoor
+        const diffuser = new THREE.Mesh(
+          new THREE.BoxGeometry(Math.max(0.08, wM - 0.05), 0.012, Math.max(0.08, dM - 0.05)),
+          diffuserMat
         );
-        door.position.set(dx, plinthH + bodyH * 0.5, dM * 0.5 - 0.015);
-        kcGroup.add(door);
+        diffuser.position.set(0, 0.004, 0);
+        lampGroup.add(diffuser);
+      } else if (element.kind === 'track_light') {
+        const railH = Math.min(0.036, hM * 0.35);
+        const rail = new THREE.Mesh(new THREE.BoxGeometry(wM, railH, Math.min(0.06, dM)), housingMat);
+        rail.position.set(0, hM - railH * 0.5, 0);
+        lampGroup.add(rail);
 
-        const barHandle = new THREE.Mesh(
-          new THREE.BoxGeometry(Math.min(0.14, singleDoorW * 0.42), 0.014, 0.022),
+        const spotCount = wM >= 1.0 ? 3 : 2;
+        const canR = Math.min(0.042, dM * 0.32);
+        const canLen = Math.min(0.11, hM * 0.65);
+        for (let i = 0; i < spotCount; i++) {
+          const sx = -wM * 0.32 + (i / (spotCount - 1)) * (wM * 0.64);
+          const stem = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.009, 0.009, 0.035, 8),
+            metalMat
+          );
+          stem.position.set(sx, hM - railH - 0.0175, 0);
+          lampGroup.add(stem);
+
+          const canGroup = new THREE.Group();
+          canGroup.position.set(sx, hM - railH - 0.045, 0);
+          canGroup.rotation.x = i % 2 === 0 ? 0.28 : -0.22;
+
+          const body = new THREE.Mesh(
+            new THREE.CylinderGeometry(canR, canR * 0.92, canLen, 14),
+            housingMat
+          );
+          body.position.set(0, -canLen * 0.45, 0);
+          canGroup.add(body);
+
+          const lens = new THREE.Mesh(
+            new THREE.CylinderGeometry(canR * 0.8, canR * 0.8, 0.012, 14),
+            diffuserMat
+          );
+          lens.position.set(0, -canLen * 0.95, 0);
+          canGroup.add(lens);
+
+          lampGroup.add(canGroup);
+        }
+      } else if (element.kind === 'recessed_light') {
+        const outerR = Math.max(0.06, Math.min(wM, dM) * 0.5);
+        const trimRing = new THREE.Mesh(
+          new THREE.CylinderGeometry(outerR, outerR * 0.94, Math.min(0.025, hM * 0.5), 22),
+          housingMat
+        );
+        trimRing.position.set(0, hM * 0.25, 0);
+        lampGroup.add(trimRing);
+
+        const innerDisc = new THREE.Mesh(
+          new THREE.CylinderGeometry(outerR * 0.72, outerR * 0.72, 0.016, 20),
+          diffuserMat
+        );
+        innerDisc.position.set(0, 0.008, 0);
+        lampGroup.add(innerDisc);
+      } else {
+        // Wall sconce
+        const backPlate = new THREE.Mesh(
+          new THREE.BoxGeometry(Math.min(0.14, wM * 0.72), Math.min(0.18, hM * 0.65), 0.025),
+          housingMat
+        );
+        backPlate.position.set(0, hM * 0.5, -dM * 0.5 + 0.0125);
+        lampGroup.add(backPlate);
+
+        const arm = new THREE.Mesh(
+          new THREE.BoxGeometry(0.024, 0.024, Math.max(0.06, dM * 0.45)),
           metalMat
         );
-        barHandle.position.set(dx, plinthH + bodyH - 0.08, dM * 0.5 + 0.005);
-        kcGroup.add(barHandle);
-      }
+        arm.position.set(0, hM * 0.45, -dM * 0.5 + dM * 0.24);
+        lampGroup.add(arm);
 
-      // Left stainless steel sink + chrome faucet
-      const sinkW = Math.min(0.68, wM * 0.28);
-      const sinkD = Math.min(0.42, dM * 0.64);
-      const sinkX = -wM * 0.26;
-      const sinkRim = new THREE.Mesh(
-        new THREE.BoxGeometry(sinkW, 0.012, sinkD),
-        metalMat
-      );
-      sinkRim.position.set(sinkX, hM + 0.006, 0.02);
-      kcGroup.add(sinkRim);
-
-      const sinkWater = new THREE.Mesh(
-        new THREE.BoxGeometry(sinkW * 0.86, 0.014, sinkD * 0.8),
-        waterAccentMat
-      );
-      sinkWater.position.set(sinkX, hM + 0.007, 0.02);
-      kcGroup.add(sinkWater);
-
-      const faucetStem = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.014, 0.016, 0.18, 10),
-        metalMat
-      );
-      faucetStem.position.set(sinkX, hM + 0.09, -sinkD * 0.45);
-      kcGroup.add(faucetStem);
-
-      const faucetSpout = new THREE.Mesh(
-        new THREE.BoxGeometry(0.022, 0.02, 0.12),
-        metalMat
-      );
-      faucetSpout.position.set(sinkX, hM + 0.175, -sinkD * 0.45 + 0.05);
-      kcGroup.add(faucetSpout);
-
-      // Right induction cooktop + 2 burner rings
-      const hobW = Math.min(0.68, wM * 0.28);
-      const hobD = Math.min(0.42, dM * 0.64);
-      const hobX = wM * 0.24;
-      const hob = new THREE.Mesh(
-        new THREE.BoxGeometry(hobW, 0.014, hobD),
-        cooktopGlassMat
-      );
-      hob.position.set(hobX, hM + 0.007, 0.01);
-      kcGroup.add(hob);
-
-      const ringR = Math.min(0.09, hobW * 0.16);
-      const burnerGeo = new THREE.CylinderGeometry(ringR, ringR, 0.004, 18);
-      for (const bOff of [-hobW * 0.22, hobW * 0.22]) {
-        const burner = new THREE.Mesh(burnerGeo, metalMat);
-        burner.position.set(hobX + bOff, hM + 0.016, 0.01);
-        kcGroup.add(burner);
-      }
-
-      if (showWireframe) {
-        const outline = new THREE.LineSegments(
-          new THREE.EdgesGeometry(new THREE.BoxGeometry(wM, hM, dM), 20),
-          wallEdgeLineMat
+        const shade = new THREE.Mesh(
+          new THREE.CylinderGeometry(
+            Math.min(0.07, wM * 0.36),
+            Math.min(0.095, wM * 0.48),
+            Math.min(0.16, hM * 0.58),
+            18
+          ),
+          diffuserMat
         );
-        outline.position.set(0, hM * 0.5, 0);
-        kcGroup.add(outline);
+        shade.position.set(0, hM * 0.54, 0.01);
+        lampGroup.add(shade);
       }
 
-      if (isSelected && customHex) {
+      if (enableLightingRender && isOn && handles.activeDynamicLightCount < 6) {
+        const lightColor = customHex ? new THREE.Color(customHex).lerp(new THREE.Color(0xfff5dc), 0.65) : 0xfff3d6;
+        const intensityMap: Record<string, number> = {
+          panel_light: 3.8,
+          track_light: 4.4,
+          recessed_light: 3.0,
+          wall_sconce: 2.6,
+        };
+        const distMap: Record<string, number> = {
+          panel_light: 7.5,
+          track_light: 7.5,
+          recessed_light: 6.0,
+          wall_sconce: 5.5,
+        };
+        const ptLight = new THREE.PointLight(
+          lightColor,
+          intensityMap[element.kind] ?? 3.2,
+          distMap[element.kind] ?? 6.5,
+          1.6
+        );
+        ptLight.castShadow = false;
+        ptLight.position.set(0, element.kind === 'wall_sconce' ? hM * 0.35 : -0.1, element.kind === 'wall_sconce' ? 0.08 : 0);
+        lampGroup.add(ptLight);
+        handles.activeDynamicLightCount += 1;
+      }
+
+      if (isSelected) {
         const selOutline = new THREE.LineSegments(
           new THREE.EdgesGeometry(new THREE.BoxGeometry(wM + 0.03, hM + 0.03, dM + 0.03)),
           selectionEdgeMat
         );
         selOutline.position.set(0, hM * 0.5, 0);
-        kcGroup.add(selOutline);
+        lampGroup.add(selOutline);
       }
 
-      roomGroup.add(kcGroup);
-    } else {
-      const cabGroup = new THREE.Group();
-      const normalDir = pl.facingNormal;
-      const cx = pl.boxCenter.x * CM_TO_M;
-      const cz = pl.boxCenter.y * CM_TO_M;
-      cabGroup.position.set(cx, elevM, cz);
-      cabGroup.rotation.y = Math.atan2(normalDir.x, normalDir.y);
-
-      const plinthH = Math.min(0.08, hM * 0.12);
-      const topTrimH = 0.025;
-      const bodyH = Math.max(0.1, hM - plinthH - topTrimH);
-
-      const plinth = new THREE.Mesh(
-        new THREE.BoxGeometry(wM - 0.01, plinthH, dM - 0.04),
-        cabPlinthMat
-      );
-      plinth.position.set(0, plinthH * 0.5, -0.015);
-      cabGroup.add(plinth);
-
-      const body = new THREE.Mesh(
-        new THREE.BoxGeometry(wM, bodyH, dM - 0.022),
-        useSelectTint ? selectedAccentMat : customMat ?? cabBodyMat
-      );
-      body.position.set(0, plinthH + bodyH * 0.5, -0.011);
-      body.castShadow = !isSoftwareGl;
-      body.receiveShadow = !isSoftwareGl;
-      cabGroup.add(body);
-
-      const topCap = new THREE.Mesh(
-        new THREE.BoxGeometry(wM + 0.008, topTrimH, dM + 0.006),
-        useSelectTint ? selectedAccentMat : customDarkMat ?? cabDoorMat
-      );
-      topCap.position.set(0, plinthH + bodyH + topTrimH * 0.5, 0);
-      topCap.castShadow = !isSoftwareGl;
-      cabGroup.add(topCap);
-
-      const numDoors = wM > 0.75 ? 2 : 1;
-      const doorGap = 0.012;
-      const singleDoorW = (wM - doorGap * (numDoors + 1)) / numDoors;
-      for (let dIdx = 0; dIdx < numDoors; dIdx++) {
-        const dx =
-          -wM * 0.5 + doorGap + singleDoorW * 0.5 + dIdx * (singleDoorW + doorGap);
-        const doorPanel = new THREE.Mesh(
-          new THREE.BoxGeometry(singleDoorW, bodyH - 0.016, 0.02),
-          useSelectTint ? selectedAccentMat : customDarkMat ?? cabDoorMat
-        );
-        doorPanel.position.set(dx, plinthH + bodyH * 0.5, dM * 0.5 - 0.01);
-        cabGroup.add(doorPanel);
-
-        const handleOffset =
-          numDoors === 2
-            ? dIdx === 0
-              ? singleDoorW * 0.36
-              : -singleDoorW * 0.36
-            : -singleDoorW * 0.35;
-        const handle = new THREE.Mesh(
-          new THREE.BoxGeometry(0.014, Math.min(0.24, bodyH * 0.25), 0.022),
-          metalMat
-        );
-        handle.position.set(
-          dx + handleOffset,
-          plinthH + Math.min(1.05, bodyH * 0.55),
-          dM * 0.5 + 0.008
-        );
-        cabGroup.add(handle);
-      }
-
-      if (showWireframe) {
-        const outlineGeo = new THREE.EdgesGeometry(
-          new THREE.BoxGeometry(wM, hM, dM),
-          20
-        );
-        const outline = new THREE.LineSegments(outlineGeo, wallEdgeLineMat);
-        outline.position.set(0, hM * 0.5, 0);
-        cabGroup.add(outline);
-      }
-
-      if (isSelected && customHex) {
-        const selOutline = new THREE.LineSegments(
-          new THREE.EdgesGeometry(new THREE.BoxGeometry(wM + 0.03, hM + 0.03, dM + 0.03)),
-          selectionEdgeMat
-        );
-        selOutline.position.set(0, hM * 0.5, 0);
-        cabGroup.add(selOutline);
-      }
-
-      roomGroup.add(cabGroup);
+      roomGroup.add(lampGroup);
     }
   }
 
@@ -1881,6 +1997,8 @@ export function buildRoomSceneGroup(
 
     roomGroup.add(dimGroup);
   }
+
+  return handles;
 }
 
 /**

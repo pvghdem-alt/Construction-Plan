@@ -15,14 +15,19 @@ export type ElementKind =
   | 'toilet'
   | 'urinal'
   | 'shower'
-  | 'sink';
+  | 'sink'
+  | 'panel_light'
+  | 'track_light'
+  | 'recessed_light'
+  | 'wall_sconce';
 
 export type ElementCategoryId =
   | 'opening'
   | 'furniture'
   | 'storage'
   | 'bathroom'
-  | 'medical';
+  | 'medical'
+  | 'lighting';
 
 export interface SnapGuideLine {
   axis: 'x' | 'y';
@@ -70,9 +75,36 @@ export interface QuoteLineItem {
   unitPrice: number;
 }
 
-export type ViewMode = '2d' | '3d' | 'split' | 'elevation' | 'quote';
+export type CabinetBaseKind = 'cabinet' | 'wall_cabinet' | 'kitchen_counter';
 
-export type CameraPreset = 'iso' | 'top' | 'interior' | 'reset';
+export type CabinetDoorMode = 'none' | 'single-left' | 'single-right' | 'double';
+
+export interface CabinetSpec {
+  drawerCount: number;
+  doorMode: CabinetDoorMode;
+  shelfCount: number;
+  hasHangingRod: boolean;
+  hasSink: boolean;
+}
+
+export interface CustomCabinetTemplate {
+  id: string;
+  name: string;
+  baseKind: CabinetBaseKind;
+  widthCm: number;
+  depthCm: number;
+  heightCm: number;
+  elevationCm: number;
+  defaultPlacement: ElementPlacementMode;
+  color?: string;
+  cabinetSpec: CabinetSpec;
+  createdAtMs: number;
+  updatedAtMs: number;
+}
+
+export type ViewMode = '2d' | '3d' | 'split' | 'elevation' | 'quote' | 'cabinet';
+
+export type CameraPreset = 'iso' | 'top' | 'interior' | 'firstPerson' | 'reset';
 
 export interface WallEdge {
   id: string;
@@ -132,6 +164,12 @@ export interface FloorplanElement {
   color?: string;
   /** Layer identifier for batch visibility & uniform layer coloring */
   layerId?: string;
+  /** Whether a lighting fixture is switched ON (defaults to true for lighting kinds) */
+  lightOn?: boolean;
+  /** Detailed cabinet configuration for customizable/interactive 3D cabinets */
+  cabinetSpec?: CabinetSpec;
+  /** Reference ID if spawned from user's CustomCabinetTemplate library */
+  customCabinetId?: string;
 }
 
 export interface SectionLine {
@@ -357,6 +395,7 @@ export interface ElevationFurnitureItem {
   heightCm: number;
   depthCm: number;
   color?: string;
+  cabinetSpec?: CabinetSpec;
 }
 
 export type ElevationRenderItem =

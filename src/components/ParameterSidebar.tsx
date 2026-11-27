@@ -29,8 +29,21 @@ import {
   Eye,
   EyeOff,
   Layers,
+  Lightbulb,
+  LampCeiling,
+  LampWallUp,
+  LayoutGrid,
+  Disc,
+  Wrench,
 } from 'lucide-react';
+import { isLightingElementKind } from '../utils/firstPersonNavigation';
+import {
+  formatCabinetSpecSummary,
+  isCabinetElementKind,
+  resolveCabinetSpecForElement,
+} from '../utils/cabinetDesigner';
 import type {
+  CustomCabinetTemplate,
   DoorSwing,
   ElementCategoryId,
   ElementKind,
@@ -81,6 +94,9 @@ interface ParameterSidebarProps {
   onAnalyzeSamplePdf: () => Promise<void>;
   isAnalyzing: boolean;
   analyzeError: string | null;
+  customCabinets?: CustomCabinetTemplate[];
+  onAddCustomCabinet?: (template: CustomCabinetTemplate) => void;
+  onOpenCabinetDesigner?: (editElement?: FloorplanElement | null) => void;
 }
 
 const ANGLE_QUICK_OPTIONS = [
@@ -105,6 +121,9 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
   onAnalyzeSamplePdf,
   isAnalyzing,
   analyzeError,
+  customCabinets = [],
+  onAddCustomCabinet,
+  onOpenCabinetDesigner,
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [activeTab, setActiveTab] = useState<'edges' | 'elements'>('edges');
@@ -377,6 +396,11 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
       const freeCount = prev.elements.filter((e) => e.placement === 'free').length;
       const staggerX = ((freeCount % 3) - 1) * 75;
       const staggerY = ((Math.floor(freeCount / 3) % 3) - 1) * 75;
+      const isCeilingLamp =
+        kind === 'panel_light' || kind === 'track_light' || kind === 'recessed_light';
+      const defaultElev = isCeilingLamp
+        ? Math.max(0, prev.ceilingHeightCm - defaults.heightCm)
+        : defaults.elevationCm;
       const newEl: FloorplanElement = {
         id: newId,
         kind,
@@ -390,11 +414,12 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
         widthCm: defaults.widthCm,
         depthCm: kind === 'door' || kind === 'window' ? prev.wallThicknessCm : defaults.depthCm,
         heightCm: defaults.heightCm,
-        elevationCm: defaults.elevationCm,
+        elevationCm: defaultElev,
         side: 'inside',
         layerId: assignedLayerId,
         ...(kind === 'door' ? { swingDirection: 'inward-right' as DoorSwing } : {}),
         ...(kind === 'bed' ? { showClearance: true } : {}),
+        ...(isLightingElementKind(kind) ? { lightOn: true } : {}),
       };
       return { ...prev, elements: [...prev.elements, newEl] };
     });
@@ -1303,6 +1328,30 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
                     icon: <Columns2 className="w-3.5 h-3.5" />,
                     cls: 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100',
                   },
+                  {
+                    kind: 'panel_light',
+                    label: '+ 平板燈',
+                    icon: <LayoutGrid className="w-3.5 h-3.5" />,
+                    cls: 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100',
+                  },
+                  {
+                    kind: 'track_light',
+                    label: '+ 軌道燈',
+                    icon: <LampCeiling className="w-3.5 h-3.5" />,
+                    cls: 'bg-yellow-50 text-yellow-800 border-yellow-200 hover:bg-yellow-100',
+                  },
+                  {
+                    kind: 'recessed_light',
+                    label: '+ 崁燈',
+                    icon: <Disc className="w-3.5 h-3.5" />,
+                    cls: 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100',
+                  },
+                  {
+                    kind: 'wall_sconce',
+                    label: '+ 壁燈',
+                    icon: <LampWallUp className="w-3.5 h-3.5" />,
+                    cls: 'bg-orange-50 text-orange-800 border-orange-200 hover:bg-orange-100',
+                  },
                 ] as Array<{
                   kind: ElementKind;
                   label: string;
@@ -1327,6 +1376,54 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
                   </button>
                 ))}
             </div>
+
+            {/* Custom Cabinet Library Quick Insert & Designer Shortcut */}
+            {(elementCategoryFilter === 'all' || elementCategoryFilter === 'storage') && (
+              <div
+                data-testid="sidebar-custom-cabinets"
+                className="p-2.5 rounded-lg border border-amber-200/80 bg-amber-50/40 space-y-2"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-semibold text-amber-900">
+                    自訂櫃體元件庫 ({customCabinets.length})
+                  </span>
+                  {onOpenCabinetDesigner && (
+                    <button
+                      type="button"
+                      onClick={() => onOpenCabinetDesigner(null)}
+                      className="flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold bg-amber-600 text-white hover:bg-amber-700 transition-colors whitespace-nowrap shrink-0"
+                    >
+                      <Wrench className="w-3 h-3" />
+                      <span>設計新櫃體</span>
+                    </button>
+                  )}
+                </div>
+
+                {customCabinets.length === 0 ? (
+                  <p className="text-[11px] text-amber-800/80">
+                    尚未儲存自訂櫃體，可點擊「設計新櫃體」建立專屬抽屜、門向、層板與掛衣桿櫃體。
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap gap-1.5">
+                    {customCabinets.map((tpl) => (
+                      <button
+                        key={tpl.id}
+                        type="button"
+                        onClick={() => onAddCustomCabinet?.(tpl)}
+                        title={`${tpl.name} (${tpl.widthCm}×${tpl.depthCm}×${tpl.heightCm} cm) · ${formatCabinetSpecSummary(tpl.cabinetSpec)}`}
+                        className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium bg-white text-slate-800 border border-amber-300 hover:bg-amber-50 transition-colors whitespace-nowrap shrink-0"
+                      >
+                        <span
+                          className="w-2 h-2 rounded-full border border-slate-300 shrink-0"
+                          style={{ backgroundColor: tpl.color ?? '#d9b382' }}
+                        />
+                        <span>+ {tpl.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Layer Management Panel */}
             <div
@@ -1589,6 +1686,25 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
                         </button>
 
                         <div className="flex items-center gap-1.5 shrink-0">
+                          {isLightingElementKind(el.kind) && (
+                            <button
+                              type="button"
+                              aria-pressed={el.lightOn !== false}
+                              aria-label={`切換 ${el.name} 燈具開關`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                updateElement(el.id, { lightOn: el.lightOn === false });
+                              }}
+                              className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10.5px] font-semibold border transition-colors whitespace-nowrap shrink-0 ${
+                                el.lightOn !== false
+                                  ? 'bg-amber-100 text-amber-800 border-amber-300 hover:bg-amber-200'
+                                  : 'bg-slate-100 text-slate-500 border-slate-200 hover:bg-slate-200'
+                              }`}
+                            >
+                              <Lightbulb className="w-3 h-3" />
+                              <span>{el.lightOn !== false ? '開燈' : '關燈'}</span>
+                            </button>
+                          )}
                           <span className="text-[11px] text-slate-500 font-mono tabular-nums whitespace-nowrap">
                             {Math.round(el.widthCm)}×{Math.round(el.depthCm)}×{Math.round(el.heightCm)}
                           </span>
@@ -1891,12 +2007,12 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
                           </label>
                           <input
                             type="number"
-                            min={5}
+                            min={2}
                             value={el.depthCm}
                             aria-label={`${el.name} 深度`}
                             onChange={(e) =>
                               updateElement(el.id, {
-                                depthCm: Math.max(5, Number(e.target.value) || 12),
+                                depthCm: Math.max(2, Number(e.target.value) || 12),
                               })
                             }
                             className="w-full px-2 py-1 text-xs font-mono tabular-nums border border-slate-200 rounded"
@@ -1908,12 +2024,12 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
                           </label>
                           <input
                             type="number"
-                            min={20}
+                            min={4}
                             value={el.heightCm}
                             aria-label={`${el.name} 高度`}
                             onChange={(e) =>
                               updateElement(el.id, {
-                                heightCm: Math.max(20, Number(e.target.value) || 210),
+                                heightCm: Math.max(4, Number(e.target.value) || 210),
                               })
                             }
                             className="w-full px-2 py-1 text-xs font-mono tabular-nums border border-slate-200 rounded"
@@ -2130,6 +2246,26 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
                         </div>
                       )}
 
+                      {!isOpening && placementMode === 'free' && isLightingElementKind(el.kind) && (
+                        <div>
+                          <label className="block text-[11px] text-slate-500 mb-0.5">
+                            安裝離地高 (cm)
+                          </label>
+                          <input
+                            type="number"
+                            min={0}
+                            value={el.elevationCm}
+                            aria-label={`${el.name} 離地高`}
+                            onChange={(e) =>
+                              updateElement(el.id, {
+                                elevationCm: Math.max(0, Number(e.target.value) || 0),
+                              })
+                            }
+                            className="w-full px-2 py-1 text-xs font-mono tabular-nums border border-slate-200 rounded"
+                          />
+                        </div>
+                      )}
+
                       {!isOpening && placementMode === 'wall' && (
                         <div className="grid grid-cols-2 gap-2">
                           <div>
@@ -2221,6 +2357,33 @@ export const ParameterSidebar: React.FC<ParameterSidebarProps> = ({
                           )}
                         </div>
                       </div>
+
+                      {/* Cabinet Interior / Door / Drawer Spec Summary & Designer Shortcut */}
+                      {isCabinetElementKind(el.kind) && (
+                        <div className="p-2 rounded-md border border-amber-200 bg-amber-50/50 flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="text-[10.5px] font-semibold text-amber-900">
+                              櫃體門扇與內部機構
+                            </div>
+                            <div className="text-[11px] text-amber-800 truncate">
+                              {formatCabinetSpecSummary(resolveCabinetSpecForElement(el))}
+                            </div>
+                          </div>
+                          {onOpenCabinetDesigner && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onOpenCabinetDesigner(el);
+                              }}
+                              className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-semibold bg-white text-amber-900 border border-amber-300 hover:bg-amber-100 whitespace-nowrap shrink-0"
+                            >
+                              <Wrench className="w-3 h-3" />
+                              <span>設計調整</span>
+                            </button>
+                          )}
+                        </div>
+                      )}
 
                       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-0.5">
                         <label className="flex items-center gap-1.5 text-xs text-teal-800 cursor-pointer">

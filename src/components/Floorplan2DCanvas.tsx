@@ -15,7 +15,10 @@ import {
   Copy,
   Eye,
   Magnet,
+  Lightbulb,
 } from 'lucide-react';
+import { isLightingElementKind } from '../utils/firstPersonNavigation';
+import { resolveCabinetSpecForElement } from '../utils/cabinetDesigner';
 import type {
   FloorplanProject,
   Point2D,
@@ -75,6 +78,7 @@ interface Floorplan2DCanvasProps {
   onDoubleClickElement?: (elementId: string) => void;
   onDeleteElement?: (elementId: string) => void;
   onToggleWallDistances?: (elementId: string) => void;
+  onToggleLight?: (elementId: string) => void;
   onCopyElement?: (elementId: string) => void;
   onCreateSectionLine?: (section: SectionLine) => void;
   onUpdateSectionLine?: (sectionId: string, patch: Partial<SectionLine>) => void;
@@ -136,6 +140,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
       onDoubleClickElement,
       onDeleteElement,
       onToggleWallDistances,
+      onToggleLight,
       onCopyElement,
       onCreateSectionLine,
       onUpdateSectionLine,
@@ -1132,6 +1137,9 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
               const fillCol = customColor || '#fef3c7';
               const strokeCol = isSelected ? '#1d4ed8' : customStrokeColor || '#b45309';
               const txtCol = customTextColor || '#78350f';
+              const cabSpec = resolveCabinetSpecForElement(element);
+              const sinkW = Math.min(pl.clampedWidthCm * 0.56, 56);
+              const sinkD = Math.min(element.depthCm * 0.6, 36);
 
               return (
                 <g
@@ -1154,24 +1162,104 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                     strokeWidth={(isSelected ? 2.5 : 1.8) * s}
                   />
                   {!customColor && <polygon points={pts} fill="url(#cabinet-hatch)" />}
-                  <line
-                    x1={c1.x}
-                    y1={c1.y}
-                    x2={c3.x}
-                    y2={c3.y}
-                    stroke={customStrokeColor || '#b45309'}
-                    strokeOpacity="0.4"
-                    strokeWidth={1 * s}
-                  />
-                  <line
-                    x1={c2.x}
-                    y1={c2.y}
-                    x2={c4.x}
-                    y2={c4.y}
-                    stroke={customStrokeColor || '#b45309'}
-                    strokeOpacity="0.4"
-                    strokeWidth={1 * s}
-                  />
+                  <g
+                    transform={`matrix(${tangent.x} ${tangent.y} ${normalDir.x} ${normalDir.y} ${boxCenter.x} ${boxCenter.y})`}
+                  >
+                    {!cabSpec.hasSink && (
+                      <>
+                        <line
+                          x1={-halfW}
+                          y1={-halfD}
+                          x2={halfW}
+                          y2={halfD}
+                          stroke={customStrokeColor || '#b45309'}
+                          strokeOpacity="0.32"
+                          strokeWidth={1 * s}
+                        />
+                        <line
+                          x1={halfW}
+                          y1={-halfD}
+                          x2={-halfW}
+                          y2={halfD}
+                          stroke={customStrokeColor || '#b45309'}
+                          strokeOpacity="0.32"
+                          strokeWidth={1 * s}
+                        />
+                      </>
+                    )}
+                    {cabSpec.hasSink && (
+                      <>
+                        <rect
+                          x={-sinkW * 0.5}
+                          y={-sinkD * 0.45}
+                          width={sinkW}
+                          height={sinkD}
+                          rx={3 * s}
+                          fill="#e2e8f0"
+                          stroke="#475569"
+                          strokeWidth={1.2 * s}
+                        />
+                        <circle
+                          cx={0}
+                          cy={0}
+                          r={Math.min(3.2, sinkW * 0.08)}
+                          fill="#94a3b8"
+                          stroke="#334155"
+                          strokeWidth={0.8 * s}
+                        />
+                        <line
+                          x1={0}
+                          y1={-halfD + 3}
+                          x2={0}
+                          y2={-sinkD * 0.14}
+                          stroke="#1e293b"
+                          strokeWidth={2 * s}
+                          strokeLinecap="round"
+                        />
+                      </>
+                    )}
+                    {/* Front face door swing/leaf indicator (+Y local is outward front normal) */}
+                    {cabSpec.doorMode === 'double' && (
+                      <>
+                        <line
+                          x1={0}
+                          y1={halfD - 5 * s}
+                          x2={0}
+                          y2={halfD + 4 * s}
+                          stroke={strokeCol}
+                          strokeWidth={1.4 * s}
+                        />
+                        <circle cx={-5 * s} cy={halfD - 3 * s} r={1.6 * s} fill={strokeCol} />
+                        <circle cx={5 * s} cy={halfD - 3 * s} r={1.6 * s} fill={strokeCol} />
+                      </>
+                    )}
+                    {cabSpec.doorMode === 'single-left' && (
+                      <>
+                        <line
+                          x1={-halfW + 3 * s}
+                          y1={halfD - 4 * s}
+                          x2={-halfW + 3 * s}
+                          y2={halfD + 3 * s}
+                          stroke={strokeCol}
+                          strokeWidth={1.6 * s}
+                        />
+                        <circle cx={halfW - 6 * s} cy={halfD - 3 * s} r={1.8 * s} fill={strokeCol} />
+                      </>
+                    )}
+                    {cabSpec.doorMode === 'single-right' && (
+                      <>
+                        <line
+                          x1={halfW - 3 * s}
+                          y1={halfD - 4 * s}
+                          x2={halfW - 3 * s}
+                          y2={halfD + 3 * s}
+                          stroke={strokeCol}
+                          strokeWidth={1.6 * s}
+                        />
+                        <circle cx={-halfW + 6 * s} cy={halfD - 3 * s} r={1.8 * s} fill={strokeCol} />
+                      </>
+                    )}
+                  </g>
                   <text
                     x={boxCenter.x}
                     y={boxCenter.y}
@@ -1205,9 +1293,13 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
               const fillCol = customColor || '#f5efe6';
               const strokeCol = isSelected ? '#1d4ed8' : customStrokeColor || '#92400e';
               const txtCol = customTextColor || '#451a03';
+              const cabSpec = resolveCabinetSpecForElement(element);
+              const showCooktop = element.cabinetSpec === undefined;
               const sinkW = Math.min(pl.clampedWidthCm * 0.28, 56);
               const sinkD = element.depthCm * 0.62;
-              const sinkCx = -halfW + Math.max(sinkW * 0.68, pl.clampedWidthCm * 0.22);
+              const sinkCx = showCooktop
+                ? -halfW + Math.max(sinkW * 0.68, pl.clampedWidthCm * 0.22)
+                : 0;
               const stoveW = Math.min(pl.clampedWidthCm * 0.3, 64);
               const stoveD = element.depthCm * 0.68;
               const stoveCx = halfW - Math.max(stoveW * 0.68, pl.clampedWidthCm * 0.22);
@@ -1250,61 +1342,79 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                       strokeOpacity="0.4"
                       strokeWidth={1.2 * s}
                     />
-                    {/* Left stainless sink basin */}
-                    <rect
-                      x={sinkCx - sinkW * 0.5}
-                      y={-sinkD * 0.45}
-                      width={sinkW}
-                      height={sinkD}
-                      rx={4 * s}
-                      fill="#e2e8f0"
-                      stroke="#475569"
-                      strokeWidth={1.3 * s}
-                    />
-                    <circle
-                      cx={sinkCx}
-                      cy={0}
-                      r={Math.min(3.5, sinkW * 0.08)}
-                      fill="#94a3b8"
-                      stroke="#334155"
-                      strokeWidth={0.9 * s}
-                    />
-                    <line
-                      x1={sinkCx}
-                      y1={-halfD + 4}
-                      x2={sinkCx}
-                      y2={-sinkD * 0.15}
-                      stroke="#1e293b"
-                      strokeWidth={2.2 * s}
-                      strokeLinecap="round"
-                    />
-                    {/* Right ceramic induction cooktop */}
-                    <rect
-                      x={stoveCx - stoveW * 0.5}
-                      y={-stoveD * 0.46}
-                      width={stoveW}
-                      height={stoveD}
-                      rx={3 * s}
-                      fill="#1e293b"
-                      stroke="#475569"
-                      strokeWidth={1.2 * s}
-                    />
-                    <circle
-                      cx={stoveCx - stoveW * 0.22}
-                      cy={0}
-                      r={Math.min(11, stoveD * 0.28)}
-                      fill="none"
-                      stroke="#cbd5e1"
-                      strokeWidth={1.3 * s}
-                    />
-                    <circle
-                      cx={stoveCx + stoveW * 0.22}
-                      cy={0}
-                      r={Math.min(9.5, stoveD * 0.24)}
-                      fill="none"
-                      stroke="#cbd5e1"
-                      strokeWidth={1.3 * s}
-                    />
+                    {/* Stainless sink basin */}
+                    {cabSpec.hasSink && (
+                      <>
+                        <rect
+                          x={sinkCx - sinkW * 0.5}
+                          y={-sinkD * 0.45}
+                          width={sinkW}
+                          height={sinkD}
+                          rx={4 * s}
+                          fill="#e2e8f0"
+                          stroke="#475569"
+                          strokeWidth={1.3 * s}
+                        />
+                        <circle
+                          cx={sinkCx}
+                          cy={0}
+                          r={Math.min(3.5, sinkW * 0.08)}
+                          fill="#94a3b8"
+                          stroke="#334155"
+                          strokeWidth={0.9 * s}
+                        />
+                        <line
+                          x1={sinkCx}
+                          y1={-halfD + 4}
+                          x2={sinkCx}
+                          y2={-sinkD * 0.15}
+                          stroke="#1e293b"
+                          strokeWidth={2.2 * s}
+                          strokeLinecap="round"
+                        />
+                      </>
+                    )}
+                    {/* Ceramic induction cooktop (legacy default kitchen counter) */}
+                    {showCooktop && (
+                      <>
+                        <rect
+                          x={stoveCx - stoveW * 0.5}
+                          y={-stoveD * 0.46}
+                          width={stoveW}
+                          height={stoveD}
+                          rx={3 * s}
+                          fill="#1e293b"
+                          stroke="#475569"
+                          strokeWidth={1.2 * s}
+                        />
+                        <circle
+                          cx={stoveCx - stoveW * 0.22}
+                          cy={0}
+                          r={Math.min(11, stoveD * 0.28)}
+                          fill="none"
+                          stroke="#cbd5e1"
+                          strokeWidth={1.3 * s}
+                        />
+                        <circle
+                          cx={stoveCx + stoveW * 0.22}
+                          cy={0}
+                          r={Math.min(9.5, stoveD * 0.24)}
+                          fill="none"
+                          stroke="#cbd5e1"
+                          strokeWidth={1.3 * s}
+                        />
+                      </>
+                    )}
+                    {cabSpec.doorMode === 'double' && (
+                      <line
+                        x1={0}
+                        y1={halfD - 4 * s}
+                        x2={0}
+                        y2={halfD + 3 * s}
+                        stroke={strokeCol}
+                        strokeWidth={1.3 * s}
+                      />
+                    )}
                   </g>
                   <text
                     x={boxCenter.x}
@@ -1818,6 +1928,7 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
               const pts = toPts([c1, c2, c3, c4]);
               const fillCol = customColor || '#ffedd5';
               const strokeCol = isSelected ? '#1d4ed8' : customStrokeColor || '#c2410c';
+              const cabSpec = resolveCabinetSpecForElement(element);
 
               return (
                 <g
@@ -1861,6 +1972,20 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                     strokeWidth={1 * s}
                     strokeDasharray={`${4 * s} ${3 * s}`}
                   />
+                  {cabSpec.doorMode === 'double' && (
+                    <g
+                      transform={`matrix(${tangent.x} ${tangent.y} ${normalDir.x} ${normalDir.y} ${boxCenter.x} ${boxCenter.y})`}
+                    >
+                      <line
+                        x1={0}
+                        y1={halfD - 4 * s}
+                        x2={0}
+                        y2={halfD + 3 * s}
+                        stroke={strokeCol}
+                        strokeWidth={1.2 * s}
+                      />
+                    </g>
+                  )}
                   <text
                     x={boxCenter.x}
                     y={boxCenter.y - 4 * s}
@@ -2312,6 +2437,195 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                     className={!readOnly ? 'font-sans cursor-move' : 'font-sans pointer-events-none'}
                   >
                     {element.name} ({Math.round(pl.clampedWidthCm)}×{Math.round(element.depthCm)})
+                  </text>
+                </g>
+              );
+            }
+
+            if (isLightingElementKind(element.kind)) {
+              const halfW = pl.clampedWidthCm * 0.5;
+              const halfD = element.depthCm * 0.5;
+              const isOn = element.lightOn !== false;
+              const activeStroke = isSelected
+                ? '#1d4ed8'
+                : customStrokeColor || (isOn ? '#d97706' : '#64748b');
+              const glowFill = customColor || (isOn ? '#fef08a' : '#f1f5f9');
+
+              return (
+                <g
+                  key={element.id}
+                  data-interactive="true"
+                  data-element-id={element.id}
+                  className={!readOnly ? 'cursor-move' : 'cursor-pointer'}
+                  onPointerDown={startFreeDrag}
+                  onDoubleClick={handleElementDoubleClick}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onSelectElement(element.id);
+                    onSelectEdge(null);
+                  }}
+                >
+                  <g
+                    transform={`matrix(${tangent.x} ${tangent.y} ${normalDir.x} ${normalDir.y} ${boxCenter.x} ${boxCenter.y})`}
+                  >
+                    {element.kind === 'panel_light' && (
+                      <>
+                        {isOn && (
+                          <rect
+                            x={-halfW - 4}
+                            y={-halfD - 4}
+                            width={pl.clampedWidthCm + 8}
+                            height={element.depthCm + 8}
+                            rx={4 * s}
+                            fill="#fde047"
+                            fillOpacity="0.22"
+                          />
+                        )}
+                        <rect
+                          x={-halfW}
+                          y={-halfD}
+                          width={pl.clampedWidthCm}
+                          height={element.depthCm}
+                          rx={2 * s}
+                          fill={glowFill}
+                          fillOpacity={isOn ? 0.85 : 0.72}
+                          stroke={activeStroke}
+                          strokeWidth={(isSelected ? 2.4 : 1.7) * s}
+                          strokeDasharray={`${5 * s} ${3 * s}`}
+                        />
+                        <line
+                          x1={-halfW}
+                          y1={0}
+                          x2={halfW}
+                          y2={0}
+                          stroke={activeStroke}
+                          strokeOpacity="0.45"
+                          strokeWidth={1.1 * s}
+                        />
+                        <line
+                          x1={0}
+                          y1={-halfD}
+                          x2={0}
+                          y2={halfD}
+                          stroke={activeStroke}
+                          strokeOpacity="0.45"
+                          strokeWidth={1.1 * s}
+                        />
+                      </>
+                    )}
+
+                    {element.kind === 'track_light' && (
+                      <>
+                        <rect
+                          x={-halfW}
+                          y={-halfD}
+                          width={pl.clampedWidthCm}
+                          height={element.depthCm}
+                          fill="transparent"
+                        />
+                        <line
+                          x1={-halfW}
+                          y1={0}
+                          x2={halfW}
+                          y2={0}
+                          stroke={isSelected ? '#1d4ed8' : '#334155'}
+                          strokeWidth={3.2 * s}
+                          strokeLinecap="round"
+                        />
+                        {[-0.32, 0, 0.32].map((frac, idx) => (
+                          <g key={idx} transform={`translate(${pl.clampedWidthCm * frac}, 0)`}>
+                            <circle
+                              cx={0}
+                              cy={0}
+                              r={Math.min(5.5, Math.max(3.6, element.depthCm * 0.32))}
+                              fill={glowFill}
+                              stroke={activeStroke}
+                              strokeWidth={1.5 * s}
+                            />
+                            {isOn && (
+                              <circle cx={0} cy={0} r={2.2 * s} fill="#f59e0b" />
+                            )}
+                          </g>
+                        ))}
+                      </>
+                    )}
+
+                    {element.kind === 'recessed_light' && (
+                      <>
+                        {isOn && (
+                          <circle
+                            cx={0}
+                            cy={0}
+                            r={Math.max(halfW, halfD) + 5}
+                            fill="#fde047"
+                            fillOpacity="0.28"
+                          />
+                        )}
+                        <circle
+                          cx={0}
+                          cy={0}
+                          r={Math.max(halfW, halfD)}
+                          fill={glowFill}
+                          stroke={activeStroke}
+                          strokeWidth={(isSelected ? 2.4 : 1.7) * s}
+                        />
+                        <circle
+                          cx={0}
+                          cy={0}
+                          r={Math.max(halfW, halfD) * 0.56}
+                          fill={isOn ? '#fef9c3' : '#e2e8f0'}
+                          stroke={activeStroke}
+                          strokeWidth={1.1 * s}
+                        />
+                      </>
+                    )}
+
+                    {element.kind === 'wall_sconce' && (
+                      <>
+                        <rect
+                          x={-halfW}
+                          y={-halfD}
+                          width={pl.clampedWidthCm}
+                          height={element.depthCm}
+                          fill="transparent"
+                        />
+                        {isOn && (
+                          <circle
+                            cx={0}
+                            cy={halfD * 0.25}
+                            r={Math.max(halfW, halfD) + 4}
+                            fill="#fed7aa"
+                            fillOpacity="0.32"
+                          />
+                        )}
+                        <rect
+                          x={-halfW * 0.68}
+                          y={-halfD}
+                          width={pl.clampedWidthCm * 0.68}
+                          height={Math.max(4, element.depthCm * 0.28)}
+                          fill="#475569"
+                        />
+                        <path
+                          d={`M ${-halfW * 0.78} ${-halfD * 0.4} A ${halfW * 0.78} ${element.depthCm * 0.72} 0 0 0 ${halfW * 0.78} ${-halfD * 0.4} Z`}
+                          fill={glowFill}
+                          stroke={activeStroke}
+                          strokeWidth={(isSelected ? 2.4 : 1.6) * s}
+                        />
+                      </>
+                    )}
+                  </g>
+                  <text
+                    x={boxCenter.x + normalDir.x * (halfD + 11 * s)}
+                    y={boxCenter.y + normalDir.y * (halfD + 11 * s)}
+                    textAnchor="middle"
+                    dominantBaseline="central"
+                    fill={isOn ? '#b45309' : '#64748b'}
+                    fontSize={8.5 * s}
+                    fontWeight="600"
+                    className="font-sans pointer-events-none"
+                  >
+                    {element.name}
+                    {isOn ? '' : ' (關)'}
                   </text>
                 </g>
               );
@@ -3169,6 +3483,23 @@ export const Floorplan2DCanvas = React.forwardRef<Floorplan2DHandle, Floorplan2D
                         </button>
                       </>
                     ) : null}
+
+                    {isLightingElementKind(el.kind) && onToggleLight && (
+                      <button
+                        type="button"
+                        aria-pressed={el.lightOn !== false}
+                        onClick={() => onToggleLight(el.id)}
+                        aria-label={`切換 ${el.name} 燈具電源`}
+                        className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-semibold border transition-colors whitespace-nowrap shrink-0 ${
+                          el.lightOn !== false
+                            ? 'bg-amber-500 text-white border-amber-500 hover:bg-amber-600'
+                            : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'
+                        }`}
+                      >
+                        <Lightbulb className="w-3 h-3" />
+                        <span>{el.lightOn !== false ? '開燈中' : '已關燈'}</span>
+                      </button>
+                    )}
 
                     {onToggleWallDistances && (
                       <button

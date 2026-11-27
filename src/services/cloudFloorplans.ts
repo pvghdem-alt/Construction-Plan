@@ -29,6 +29,11 @@ import type {
 } from '../types/floorplan';
 import { ALL_DOOR_SWINGS, sanitizeHexColor } from '../utils/floorplanGeometry';
 import {
+  isCabinetElementKind,
+  resolveCabinetBaseKind,
+  sanitizeCabinetSpec,
+} from '../utils/cabinetDesigner';
+import {
   buildShareDocId,
   mergeShareEmailLists,
   normalizeEmailAddress,
@@ -111,8 +116,8 @@ function sanitizeElement(el: FloorplanElement, idx: number): Record<string, unkn
     offsetCm: Math.max(0, finiteOr(el.offsetCm, 0)),
     rotationDeg: ((finiteOr(el.rotationDeg, 0) % 360) + 360) % 360,
     widthCm: Math.max(5, finiteOr(el.widthCm, 90)),
-    depthCm: Math.max(5, finiteOr(el.depthCm, 12)),
-    heightCm: Math.max(10, finiteOr(el.heightCm, 210)),
+    depthCm: Math.max(2, finiteOr(el.depthCm, 12)),
+    heightCm: Math.max(4, finiteOr(el.heightCm, 210)),
     elevationCm: Math.max(0, finiteOr(el.elevationCm, 0)),
     side: el.side === 'outside' ? 'outside' : 'inside',
   };
@@ -131,12 +136,25 @@ function sanitizeElement(el: FloorplanElement, idx: number): Record<string, unkn
   if (typeof el.showWallDistances === 'boolean') {
     out.showWallDistances = el.showWallDistances;
   }
+  if (typeof el.lightOn === 'boolean') {
+    out.lightOn = el.lightOn;
+  }
   const cleanColor = sanitizeHexColor(el.color);
   if (cleanColor) {
     out.color = cleanColor;
   }
   if (typeof el.layerId === 'string' && el.layerId.trim()) {
     out.layerId = el.layerId.trim().slice(0, 64);
+  }
+  if (isCabinetElementKind(el.kind) && el.cabinetSpec && typeof el.cabinetSpec === 'object') {
+    out.cabinetSpec = sanitizeCabinetSpec(
+      el.cabinetSpec,
+      resolveCabinetBaseKind(el.kind),
+      Math.max(5, finiteOr(el.widthCm, 90))
+    );
+  }
+  if (typeof el.customCabinetId === 'string' && el.customCabinetId.trim()) {
+    out.customCabinetId = el.customCabinetId.trim().slice(0, 80);
   }
   return out;
 }

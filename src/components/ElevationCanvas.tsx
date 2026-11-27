@@ -27,6 +27,10 @@ import {
   sanitizeHexColor,
 } from '../utils/floorplanGeometry';
 import { buildElevationSvgString } from '../utils/drawingSvgExport';
+import {
+  isCabinetElementKind,
+  resolveCabinetSpecForElement,
+} from '../utils/cabinetDesigner';
 
 interface ElevationCanvasProps {
   project: FloorplanProject;
@@ -408,6 +412,10 @@ export const ElevationCanvas: React.FC<ElevationCanvasProps> = ({
                 urinal: { fill: '#f0f9ff', stroke: '#0369a1' },
                 shower: { fill: '#eef2ff', stroke: '#4f46e5' },
                 sink: { fill: '#ecfeff', stroke: '#0891b2' },
+                panel_light: { fill: '#fef9c3', stroke: '#ca8a04' },
+                track_light: { fill: '#fef3c7', stroke: '#334155' },
+                recessed_light: { fill: '#fef08a', stroke: '#d97706' },
+                wall_sconce: { fill: '#ffedd5', stroke: '#b45309' },
               };
               const baseP = palette[f.kind] ?? { fill: '#f1f5f9', stroke: '#475569' };
               const customHex = sanitizeHexColor(f.color);
@@ -438,36 +446,128 @@ export const ElevationCanvas: React.FC<ElevationCanvasProps> = ({
                     strokeWidth={(isSel ? 2.4 : 1.5) * s}
                     strokeDasharray={f.kind === 'wall_cabinet' ? `${5 * s} ${3 * s}` : undefined}
                   />
-                  {(f.kind === 'cabinet' || f.kind === 'wall_cabinet') && fw > 55 && (
-                    <line
-                      x1={midX}
-                      y1={yTop + 4 * s}
-                      x2={midX}
-                      y2={yTop + f.heightCm - 4 * s}
-                      stroke={strokeHex}
-                      strokeOpacity="0.45"
-                      strokeWidth={1 * s}
-                    />
-                  )}
-                  {f.kind === 'kitchen_counter' && (
-                    <>
-                      <line
-                        x1={f.sStartCm}
-                        y1={yTop + 5 * s}
-                        x2={f.sEndCm}
-                        y2={yTop + 5 * s}
-                        stroke={strokeHex}
-                        strokeWidth={1.3 * s}
-                      />
-                      <path
-                        d={`M ${f.sStartCm + fw * 0.25} ${yTop} L ${f.sStartCm + fw * 0.25} ${yTop - 16 * s} Q ${f.sStartCm + fw * 0.25} ${yTop - 22 * s} ${f.sStartCm + fw * 0.25 + 8 * s} ${yTop - 18 * s}`}
-                        fill="none"
-                        stroke="#475569"
-                        strokeWidth={1.8 * s}
-                        strokeLinecap="round"
-                      />
-                    </>
-                  )}
+                  {isCabinetElementKind(f.kind) &&
+                    (() => {
+                      const cabSpec = resolveCabinetSpecForElement({
+                        kind: f.kind,
+                        widthCm: fw,
+                        cabinetSpec: f.cabinetSpec,
+                      });
+                      const hasUpper =
+                        cabSpec.doorMode !== 'none' ||
+                        cabSpec.shelfCount > 0 ||
+                        cabSpec.hasHangingRod;
+                      const drawerRatio =
+                        cabSpec.drawerCount > 0
+                          ? Math.min(hasUpper ? 0.54 : 0.9, cabSpec.drawerCount * 0.16)
+                          : 0;
+                      const drawerZoneH = f.heightCm * drawerRatio;
+                      const upperH = Math.max(0, f.heightCm - drawerZoneH);
+                      const yDrawerTop = yTop + upperH;
+                      const sinkOffsetX =
+                        f.kind === 'kitchen_counter' && !f.cabinetSpec
+                          ? f.sStartCm + fw * 0.25
+                          : midX;
+                      return (
+                        <>
+                          {cabSpec.drawerCount > 0 && (
+                            <>
+                              <line
+                                x1={f.sStartCm}
+                                y1={yDrawerTop}
+                                x2={f.sEndCm}
+                                y2={yDrawerTop}
+                                stroke={strokeHex}
+                                strokeOpacity="0.6"
+                                strokeWidth={1.2 * s}
+                              />
+                              {Array.from({ length: cabSpec.drawerCount }, (_, dIdx) => {
+                                const perH = drawerZoneH / cabSpec.drawerCount;
+                                const lineY = yDrawerTop + perH * dIdx;
+                                const pullY = lineY + perH * 0.5;
+                                return (
+                                  <React.Fragment key={dIdx}>
+                                    {dIdx > 0 && (
+                                      <line
+                                        x1={f.sStartCm}
+                                        y1={lineY}
+                                        x2={f.sEndCm}
+                                        y2={lineY}
+                                        stroke={strokeHex}
+                                        strokeOpacity="0.45"
+                                        strokeWidth={1 * s}
+                                      />
+                                    )}
+                                    <line
+                                      x1={midX - Math.min(10, fw * 0.14)}
+                                      y1={pullY}
+                                      x2={midX + Math.min(10, fw * 0.14)}
+                                      y2={pullY}
+                                      stroke={strokeHex}
+                                      strokeOpacity="0.65"
+                                      strokeWidth={1.6 * s}
+                                      strokeLinecap="round"
+                                    />
+                                  </React.Fragment>
+                                );
+                              })}
+                            </>
+                          )}
+                          {upperH > 12 && cabSpec.doorMode === 'double' && (
+                            <line
+                              x1={midX}
+                              y1={yTop + 4 * s}
+                              x2={midX}
+                              y2={yTop + upperH - 3 * s}
+                              stroke={strokeHex}
+                              strokeOpacity="0.5"
+                              strokeWidth={1.1 * s}
+                            />
+                          )}
+                          {upperH > 12 &&
+                            (cabSpec.doorMode === 'single-left' ||
+                              cabSpec.doorMode === 'single-right') && (
+                              <line
+                                x1={
+                                  cabSpec.doorMode === 'single-left'
+                                    ? f.sEndCm - Math.min(7, fw * 0.12)
+                                    : f.sStartCm + Math.min(7, fw * 0.12)
+                                }
+                                y1={yTop + upperH * 0.42}
+                                x2={
+                                  cabSpec.doorMode === 'single-left'
+                                    ? f.sEndCm - Math.min(7, fw * 0.12)
+                                    : f.sStartCm + Math.min(7, fw * 0.12)
+                                }
+                                y2={yTop + upperH * 0.62}
+                                stroke={strokeHex}
+                                strokeOpacity="0.7"
+                                strokeWidth={1.8 * s}
+                                strokeLinecap="round"
+                              />
+                            )}
+                          {cabSpec.hasSink && (
+                            <>
+                              <line
+                                x1={f.sStartCm}
+                                y1={yTop + 5 * s}
+                                x2={f.sEndCm}
+                                y2={yTop + 5 * s}
+                                stroke={strokeHex}
+                                strokeWidth={1.3 * s}
+                              />
+                              <path
+                                d={`M ${sinkOffsetX} ${yTop} L ${sinkOffsetX} ${yTop - 16 * s} Q ${sinkOffsetX} ${yTop - 22 * s} ${sinkOffsetX + 8 * s} ${yTop - 18 * s}`}
+                                fill="none"
+                                stroke="#475569"
+                                strokeWidth={1.8 * s}
+                                strokeLinecap="round"
+                              />
+                            </>
+                          )}
+                        </>
+                      );
+                    })()}
                   {f.kind === 'sofa' && (
                     <line
                       x1={f.sStartCm + fw * 0.1}

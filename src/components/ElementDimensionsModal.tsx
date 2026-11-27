@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { X, Trash2, Check, Palette } from 'lucide-react';
+import { X, Trash2, Check, Palette, Lightbulb } from 'lucide-react';
 import type { DoorSwing, ElementKind, FloorplanElement, UnitType } from '../types/floorplan';
 import {
   buildDoorSwing,
@@ -8,6 +8,7 @@ import {
   parseDoorSwing,
   sanitizeHexColor,
 } from '../utils/floorplanGeometry';
+import { isLightingElementKind } from '../utils/firstPersonNavigation';
 
 interface ElementDimensionsModalProps {
   element: FloorplanElement | null;
@@ -33,6 +34,10 @@ const KIND_LABELS: Record<ElementKind, string> = {
   urinal: '小便斗',
   shower: '蓮蓬頭',
   sink: '洗手台',
+  panel_light: '平板燈',
+  track_light: '軌道燈',
+  recessed_light: '崁燈',
+  wall_sconce: '壁燈',
 };
 
 export const ElementDimensionsModal: React.FC<ElementDimensionsModalProps> = ({
@@ -53,6 +58,7 @@ export const ElementDimensionsModal: React.FC<ElementDimensionsModalProps> = ({
   const [rotationDeg, setRotationDeg] = useState('0');
   const [swingDirection, setSwingDirection] = useState<DoorSwing>('inward-right');
   const [color, setColor] = useState('');
+  const [lightOn, setLightOn] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
@@ -68,6 +74,7 @@ export const ElementDimensionsModal: React.FC<ElementDimensionsModalProps> = ({
     setRotationDeg(String(Math.round(element.rotationDeg ?? 0)));
     setSwingDirection(element.swingDirection || 'inward-right');
     setColor(sanitizeHexColor(element.color) ?? '');
+    setLightOn(element.lightOn !== false);
     setErrorMsg(null);
   }, [element]);
 
@@ -120,6 +127,7 @@ export const ElementDimensionsModal: React.FC<ElementDimensionsModalProps> = ({
       heightCm: Math.round(h * 10) / 10,
       elevationCm: Math.round(elev * 10) / 10,
       color: sanitizeHexColor(color),
+      ...(isLightingElementKind(element.kind) ? { lightOn } : {}),
     };
 
     if (isFree) {
@@ -522,6 +530,27 @@ export const ElementDimensionsModal: React.FC<ElementDimensionsModalProps> = ({
               </label>
             </div>
           </div>
+
+          {isLightingElementKind(element.kind) && (
+            <div className="pt-2 border-t border-slate-100 flex items-center justify-between">
+              <span className="flex items-center gap-1.5 text-xs font-medium text-slate-700">
+                <Lightbulb className="w-3.5 h-3.5 text-amber-500" />
+                <span>燈具電源開關</span>
+              </span>
+              <button
+                type="button"
+                aria-pressed={lightOn}
+                onClick={() => setLightOn((v) => !v)}
+                className={`px-3 py-1 rounded-md text-xs font-semibold border transition-colors ${
+                  lightOn
+                    ? 'bg-amber-500 text-white border-amber-500 hover:bg-amber-600'
+                    : 'bg-slate-100 text-slate-600 border-slate-200 hover:bg-slate-200'
+                }`}
+              >
+                {lightOn ? '開燈中' : '已關燈'}
+              </button>
+            </div>
+          )}
 
           {errorMsg && (
             <p role="alert" className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">

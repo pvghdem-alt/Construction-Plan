@@ -103,6 +103,11 @@ export const ELEMENT_CATEGORIES: ReadonlyArray<{
   { id: 'storage', label: '廚具櫃體', kinds: ['cabinet', 'wall_cabinet', 'kitchen_counter'] },
   { id: 'bathroom', label: '衛浴設備', kinds: ['toilet', 'urinal', 'shower', 'sink'] },
   { id: 'medical', label: '病房設施', kinds: ['bed', 'bed_curtain'] },
+  {
+    id: 'lighting',
+    label: '燈具照明',
+    kinds: ['panel_light', 'track_light', 'recessed_light', 'wall_sconce'],
+  },
 ];
 
 export const ELEMENT_KIND_DEFAULTS: Record<
@@ -253,6 +258,42 @@ export const ELEMENT_KIND_DEFAULTS: Record<
     depthCm: 48,
     heightCm: 85,
     elevationCm: 0,
+  },
+  panel_light: {
+    label: '平板燈',
+    category: 'lighting',
+    defaultPlacement: 'free',
+    widthCm: 60,
+    depthCm: 60,
+    heightCm: 6,
+    elevationCm: 244,
+  },
+  track_light: {
+    label: '軌道燈',
+    category: 'lighting',
+    defaultPlacement: 'free',
+    widthCm: 120,
+    depthCm: 16,
+    heightCm: 18,
+    elevationCm: 232,
+  },
+  recessed_light: {
+    label: '崁燈',
+    category: 'lighting',
+    defaultPlacement: 'free',
+    widthCm: 18,
+    depthCm: 18,
+    heightCm: 8,
+    elevationCm: 242,
+  },
+  wall_sconce: {
+    label: '壁燈',
+    category: 'lighting',
+    defaultPlacement: 'wall',
+    widthCm: 22,
+    depthCm: 16,
+    heightCm: 28,
+    elevationCm: 170,
   },
 };
 
@@ -1979,9 +2020,10 @@ export function computeSectionElevation(
         visibleSStartCm,
         visibleSEndCm,
         elevationCm: Math.max(0, el.elevationCm),
-        heightCm: Math.min(ceilingHeightCm, Math.max(10, el.heightCm)),
+        heightCm: Math.min(ceilingHeightCm, Math.max(4, el.heightCm)),
         depthCm: frontDepth,
         ...(el.color ? { color: el.color } : {}),
+        ...(el.cabinetSpec ? { cabinetSpec: el.cabinetSpec } : {}),
       });
     }
   }
@@ -2059,6 +2101,7 @@ export const DEFAULT_FLOORPLAN_LAYERS: ReadonlyArray<FloorplanLayer> = [
   { id: 'layer-storage', name: '廚具櫃體圖層', visible: true },
   { id: 'layer-bathroom', name: '衛浴設備圖層', visible: true },
   { id: 'layer-medical', name: '病房設施圖層', visible: true },
+  { id: 'layer-lighting', name: '燈具照明圖層', visible: true },
 ];
 
 export function getEffectiveLayers(layers?: ReadonlyArray<FloorplanLayer>): FloorplanLayer[] {

@@ -20,6 +20,10 @@ import {
   parseDoorSwing,
   sanitizeHexColor,
 } from './floorplanGeometry';
+import {
+  isCabinetElementKind,
+  resolveCabinetSpecForElement,
+} from './cabinetDesigner';
 
 function escXml(str: string): string {
   return str
@@ -158,7 +162,11 @@ export function buildFloorplan2DSvgString(
       element.kind === 'toilet' ||
       element.kind === 'urinal' ||
       element.kind === 'shower' ||
-      element.kind === 'sink'
+      element.kind === 'sink' ||
+      element.kind === 'panel_light' ||
+      element.kind === 'track_light' ||
+      element.kind === 'recessed_light' ||
+      element.kind === 'wall_sconce'
     ) {
       const halfW = pl.clampedWidthCm * 0.5;
       const halfD = element.depthCm * 0.5;
@@ -174,6 +182,10 @@ export function buildFloorplan2DSvgString(
         urinal: '#f0f9ff',
         shower: '#eef2ff',
         sink: '#ecfeff',
+        panel_light: element.lightOn !== false ? '#fef9c3' : '#f1f5f9',
+        track_light: element.lightOn !== false ? '#fef3c7' : '#e2e8f0',
+        recessed_light: element.lightOn !== false ? '#fef08a' : '#f1f5f9',
+        wall_sconce: element.lightOn !== false ? '#ffedd5' : '#f1f5f9',
       };
       const strokeMap: Record<string, string> = {
         cabinet: '#b45309',
@@ -187,6 +199,10 @@ export function buildFloorplan2DSvgString(
         urinal: '#0369a1',
         shower: '#4f46e5',
         sink: '#0891b2',
+        panel_light: element.lightOn !== false ? '#d97706' : '#64748b',
+        track_light: element.lightOn !== false ? '#b45309' : '#475569',
+        recessed_light: element.lightOn !== false ? '#ca8a04' : '#64748b',
+        wall_sconce: element.lightOn !== false ? '#ea580c' : '#64748b',
       };
       const customFill = sanitizeHexColor(element.color);
       const fillHex = customFill || fillMap[element.kind];
@@ -207,6 +223,21 @@ export function buildFloorplan2DSvgString(
             backDepth * 0.5
           )}" fill="${darkenHexColor(fillHex, 0.86)}" stroke="${strokeHex}" stroke-width="${1.1 * s}" />`
         );
+      }
+      if (isCabinetElementKind(element.kind)) {
+        const cabSpec = resolveCabinetSpecForElement(element);
+        if (cabSpec.hasSink) {
+          const sinkW = Math.min(pl.clampedWidthCm * 0.45, 52);
+          const sinkD = Math.min(element.depthCm * 0.56, 34);
+          parts.push(
+            `<polygon points="${rectPts(boxCenter.x, boxCenter.y, sinkW * 0.5, sinkD * 0.5)}" fill="#e2e8f0" stroke="#475569" stroke-width="${1.1 * s}" />`
+          );
+        }
+        if (cabSpec.doorMode === 'double') {
+          parts.push(
+            `<line x1="${boxCenter.x + facingNormal.x * (halfD - 4 * s)}" y1="${boxCenter.y + facingNormal.y * (halfD - 4 * s)}" x2="${boxCenter.x + facingNormal.x * (halfD + 3 * s)}" y2="${boxCenter.y + facingNormal.y * (halfD + 3 * s)}" stroke="${strokeHex}" stroke-width="${1.3 * s}" />`
+          );
+        }
       }
       parts.push(
         `<text x="${boxCenter.x}" y="${boxCenter.y}" text-anchor="middle" dominant-baseline="central" fill="${textHex}" font-size="${9 * s}" font-weight="600">${escXml(element.name)}</text>`
@@ -475,6 +506,10 @@ export function buildElevationSvgString(
         urinal: { fill: '#f0f9ff', stroke: '#0369a1' },
         shower: { fill: '#eef2ff', stroke: '#4f46e5' },
         sink: { fill: '#ecfeff', stroke: '#0891b2' },
+        panel_light: { fill: '#fef9c3', stroke: '#ca8a04' },
+        track_light: { fill: '#fef3c7', stroke: '#334155' },
+        recessed_light: { fill: '#fef08a', stroke: '#d97706' },
+        wall_sconce: { fill: '#ffedd5', stroke: '#b45309' },
       };
       const baseP = palette[f.kind] ?? { fill: '#f1f5f9', stroke: '#475569' };
       const customFill = sanitizeHexColor(f.color);
@@ -485,6 +520,43 @@ export function buildElevationSvgString(
       parts.push(
         `<rect x="${f.sStartCm}" y="${yTop}" width="${fw}" height="${f.heightCm}" fill="${fillHex}" fill-opacity="${baseP.opacity ?? 0.92}" stroke="${strokeHex}" stroke-width="${1.4 * s}"${dashAttr} />`
       );
+      if (isCabinetElementKind(f.kind)) {
+        const cabSpec = resolveCabinetSpecForElement({
+          kind: f.kind,
+          widthCm: fw,
+          cabinetSpec: f.cabinetSpec,
+        });
+        const hasUpper =
+          cabSpec.doorMode !== 'none' || cabSpec.shelfCount > 0 || cabSpec.hasHangingRod;
+        const drawerRatio =
+          cabSpec.drawerCount > 0
+            ? Math.min(hasUpper ? 0.54 : 0.9, cabSpec.drawerCount * 0.16)
+            : 0;
+        const drawerZoneH = f.heightCm * drawerRatio;
+        const upperH = Math.max(0, f.heightCm - drawerZoneH);
+        const yDrawerTop = yTop + upperH;
+        const midX = (f.sStartCm + f.sEndCm) * 0.5;
+        if (cabSpec.drawerCount > 0) {
+          for (let dIdx = 0; dIdx < cabSpec.drawerCount; dIdx++) {
+            const perH = drawerZoneH / cabSpec.drawerCount;
+            const lineY = yDrawerTop + perH * dIdx;
+            parts.push(
+              `<line x1="${f.sStartCm}" y1="${lineY}" x2="${f.sEndCm}" y2="${lineY}" stroke="${strokeHex}" stroke-opacity="0.5" stroke-width="${1 * s}" />`
+            );
+          }
+        }
+        if (upperH > 12 && cabSpec.doorMode === 'double') {
+          parts.push(
+            `<line x1="${midX}" y1="${yTop + 4 * s}" x2="${midX}" y2="${yTop + upperH - 3 * s}" stroke="${strokeHex}" stroke-opacity="0.5" stroke-width="${1 * s}" />`
+          );
+        }
+        if (cabSpec.hasSink) {
+          const sx = f.kind === 'kitchen_counter' && !f.cabinetSpec ? f.sStartCm + fw * 0.25 : midX;
+          parts.push(
+            `<path d="M ${sx} ${yTop} L ${sx} ${yTop - 16 * s} Q ${sx} ${yTop - 22 * s} ${sx + 8 * s} ${yTop - 18 * s}" fill="none" stroke="#475569" stroke-width="${1.6 * s}" stroke-linecap="round" />`
+          );
+        }
+      }
       parts.push(
         `<text x="${visMidX}" y="${yTop + f.heightCm * 0.5}" text-anchor="middle" dominant-baseline="central" fill="${textHex}" font-size="${8.5 * s}" font-weight="600">${escXml(f.name)}</text>`
       );

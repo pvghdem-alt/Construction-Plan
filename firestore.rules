@@ -181,6 +181,62 @@ service cloud.firestore {
         (!docData.keys().hasAny(['accessLevel']) || docData.accessLevel == 'editor');
     }
 
+    function isValidCabinetSpec(spec) {
+      return spec is map &&
+        spec.keys().hasAll(['drawerCount', 'doorMode', 'shelfCount', 'hasHangingRod', 'hasSink']) &&
+        spec.keys().hasOnly(['drawerCount', 'doorMode', 'shelfCount', 'hasHangingRod', 'hasSink']) &&
+        spec.drawerCount is int && spec.drawerCount >= 0 && spec.drawerCount <= 6 &&
+        spec.doorMode is string && spec.doorMode.size() <= 20 && spec.doorMode in ['none', 'single-left', 'single-right', 'double'] &&
+        spec.shelfCount is int && spec.shelfCount >= 0 && spec.shelfCount <= 8 &&
+        spec.hasHangingRod is bool &&
+        spec.hasSink is bool;
+    }
+
+    function isValidCustomCabinet(data, userId, cabinetId) {
+      return data.keys().hasAll([
+          'id',
+          'ownerId',
+          'name',
+          'baseKind',
+          'widthCm',
+          'depthCm',
+          'heightCm',
+          'elevationCm',
+          'defaultPlacement',
+          'cabinetSpec',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id',
+          'ownerId',
+          'name',
+          'baseKind',
+          'widthCm',
+          'depthCm',
+          'heightCm',
+          'elevationCm',
+          'defaultPlacement',
+          'color',
+          'cabinetSpec',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.id is string && data.id == cabinetId && data.id.size() >= 1 && data.id.size() <= 80 &&
+        data.ownerId is string && data.ownerId == userId && data.ownerId == request.auth.uid && data.ownerId.size() <= 128 &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 60 &&
+        data.baseKind is string && data.baseKind.size() <= 30 && data.baseKind in ['cabinet', 'wall_cabinet', 'kitchen_counter'] &&
+        data.widthCm is number && data.widthCm >= 20 && data.widthCm <= 600 &&
+        data.depthCm is number && data.depthCm >= 15 && data.depthCm <= 200 &&
+        data.heightCm is number && data.heightCm >= 20 && data.heightCm <= 350 &&
+        data.elevationCm is number && data.elevationCm >= 0 && data.elevationCm <= 300 &&
+        data.defaultPlacement is string && data.defaultPlacement.size() <= 10 && data.defaultPlacement in ['wall', 'free'] &&
+        (!data.keys().hasAny(['color']) || (data.color is string && data.color.size() == 7 && data.color.matches('^#[0-9a-fA-F]{6}$'))) &&
+        isValidCabinetSpec(data.cabinetSpec) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp && data.updatedAt == request.time;
+    }
+
     match /users/{userId} {
       allow get: if isValidId(userId) && isOwner(userId);
       allow list: if false;
@@ -221,6 +277,32 @@ service cloud.firestore {
             'updatedAt'
           ]);
         allow delete: if isValidId(userId) && isValidId(planId) && isOwner(userId) && existing().ownerId == request.auth.uid;
+      }
+
+      match /custom_cabinets/{cabinetId} {
+        allow get: if isValidId(userId) && isValidId(cabinetId) && isOwner(userId) && existing().ownerId == request.auth.uid;
+        allow list: if isValidId(userId) && isOwner(userId) && resource.data.ownerId == request.auth.uid;
+        allow create: if isValidId(userId) && isValidId(cabinetId) && isOwner(userId) &&
+          isValidCustomCabinet(incoming(), userId, cabinetId) &&
+          incoming().createdAt == request.time;
+        allow update: if isValidId(userId) && isValidId(cabinetId) && isOwner(userId) &&
+          isValidCustomCabinet(incoming(), userId, cabinetId) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().id == existing().id &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'name',
+            'baseKind',
+            'widthCm',
+            'depthCm',
+            'heightCm',
+            'elevationCm',
+            'defaultPlacement',
+            'color',
+            'cabinetSpec',
+            'updatedAt'
+          ]);
+        allow delete: if isValidId(userId) && isValidId(cabinetId) && isOwner(userId) && existing().ownerId == request.auth.uid;
       }
     }
 

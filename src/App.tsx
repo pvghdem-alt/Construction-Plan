@@ -15,6 +15,7 @@ import {
   Share2,
   Lock,
   Receipt,
+  PackagePlus,
 } from 'lucide-react';
 import {
   createUserWithEmailAndPassword,
@@ -48,6 +49,7 @@ import {
   type ShareAccessLevel,
 } from './utils/cloudShareHelpers';
 import { CloudStorageModal } from './components/CloudStorageModal';
+import { CabinetDesignerView } from './components/CabinetDesignerView';
 import { ElementDimensionsModal } from './components/ElementDimensionsModal';
 import { ElevationCanvas } from './components/ElevationCanvas';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -58,7 +60,21 @@ import { QuotationSheetView } from './components/QuotationSheetView';
 import { ReadOnlySummarySidebar } from './components/ReadOnlySummarySidebar';
 import { ShareModal } from './components/ShareModal';
 import { WallAreaModal } from './components/WallAreaModal';
+import {
+  deleteCloudCustomCabinet,
+  subscribeUserCustomCabinets,
+  upsertCloudCustomCabinet,
+} from './services/customCabinets';
+import {
+  CABINET_LOCAL_STORAGE_KEY,
+  createElementFromCabinetTemplate,
+  loadLocalCustomCabinets,
+  mergeCustomCabinetLibraries,
+  sanitizeCabinetSpec,
+  saveLocalCustomCabinets,
+} from './utils/cabinetDesigner';
 import type {
+  CustomCabinetTemplate,
   FloorplanElement,
   FloorplanProject,
   QuoteLineItem,
@@ -203,6 +219,12 @@ export default function App() {
   const [activeCloudId, setActiveCloudId] = useState<string | null>(null);
   const [activeSharedId, setActiveSharedId] = useState<string | null>(null);
 
+  // Reusable Custom Cabinet Library (localStorage + Firestore sync)
+  const [customCabinets, setCustomCabinets] = useState<CustomCabinetTemplate[]>(() =>
+    loadLocalCustomCabinets()
+  );
+  const [cabinetDesignElementId, setCabinetDesignElementId] = useState<string | null>(null);
+
   const canvas2DRef = useRef<Floorplan2DHandle | null>(null);
   const canvas3DRef = useRef<Floorplan3DHandle | null>(null);
   const clipboardElementRef = useRef<FloorplanElement | null>(null);
@@ -289,6 +311,18 @@ export default function App() {
         : null,
     [project.elements, editingElementId]
   );
+  const cabinetDesignElement = useMemo(
+    () =>
+      cabinetDesignElementId
+        ? project.elements.find((el) => el.id === cabinetDesignElementId) ?? null
+        : null,
+    [project.elements, cabinetDesignElementId]
+  );
+
+  // Persist custom cabinet library to localStorage whenever modified
+  useEffect(() => {
+    saveLocalCustomCabinets(customCabinets);
+  }, [customCabinets]);
 
   // Auth listener + conditional Firestore onSnapshot listener (requires verified email per firestore.rules)
   useEffect(() => {
@@ -358,10 +392,20 @@ export default function App() {
           }
         )
       : () => {};
+    const unsubCustomCabinets = subscribeUserCustomCabinets(
+      user.uid,
+      (cloudTemplates) => {
+        setCustomCabinets((prev) => mergeCustomCabinetLibraries(prev, cloudTemplates));
+      },
+      (err) => {
+        setCloudError(err.message);
+      }
+    );
     return () => {
       unsubOwn();
       unsubMyShares();
       unsubSharedWithMe();
+      unsubCustomCabinets();
     };
   }, [authReady, user, authRefreshTick]);
 
@@ -709,6 +753,18 @@ export default function App() {
     [setProject]
   );
 
+  const handleToggleLight = useCallback(
+    (elementId: string) => {
+      setProject((prev) => ({
+        ...prev,
+        elements: prev.elements.map((el) =>
+          el.id === elementId ? { ...el, lightOn: el.lightOn === false } : el
+        ),
+      }));
+    },
+    [setProject]
+  );
+
   const handleCopyElement = useCallback(
     (elementId?: string | null) => {
       const targetId = elementId ?? selectedElementId;
@@ -811,6 +867,122 @@ export default function App() {
     [setProject]
   );
 
+  const handleSaveCustomCabinet = useCallback(
+    async (template: CustomCabinetTemplate, isNew: boolean) => {
+      setCustomCabinets((prev) => {
+        const next = mergeCustomCabinetLibraries(
+          prev.filter((t) => t.id !== template.id),
+          [template]
+        );
+        if (typeof window !== 'undefined' && window.localStorage) {
+          try {
+            window.localStorage.setItem(CABINET_LOCAL_STORAGE_KEY, JSON.stringify(next));
+          } catch {
+            // ignore
+          }
+        }
+        return next;
+      });
+      if (user && user.emailVerified) {
+        try {
+          await upsertCloudCustomCabinet(user.uid, template, isNew);
+        } catch (err) {
+          showToast(
+            err instanceof Error
+              ? `已儲存在本機，雲端同步失敗：${err.message}`
+              : '已儲存在本機，雲端同步失敗'
+          );
+          return;
+        }
+      }
+      showToast(isNew ? `已儲存自訂櫃體「${template.name}」` : `已更新自訂櫃體「${template.name}」`);
+    },
+    [user, showToast]
+  );
+
+  const handleDeleteCustomCabinet = useCallback(
+    async (templateId: string) => {
+      setCustomCabinets((prev) => prev.filter((t) => t.id !== templateId));
+      if (user && user.emailVerified) {
+        try {
+          await deleteCloudCustomCabinet(user.uid, templateId);
+        } catch (err) {
+          showToast(
+            err instanceof Error ? `雲端刪除失敗：${err.message}` : '雲端刪除失敗'
+          );
+          return;
+        }
+      }
+      showToast('已刪除自訂櫃體範本');
+    },
+    [user, showToast]
+  );
+
+  const handleInsertCustomCabinet = useCallback(
+    (template: CustomCabinetTemplate) => {
+      const currentProj = projectRef.current;
+      const currentSolved = solveFloorplan(currentProj);
+      const created =
+        createElementFromCabinetTemplate(template, currentProj, currentSolved, {
+          selectedEdgeId,
+        }) ??
+        createElementFromCabinetTemplate(
+          { ...template, defaultPlacement: 'free' },
+          currentProj,
+          currentSolved,
+          { selectedEdgeId }
+        );
+      if (!created) return;
+      setProject((prev) => ({
+        ...prev,
+        elements: [...prev.elements, created],
+      }));
+      setSelectedElementId(created.id);
+      setSelectedEdgeId(null);
+      setSelectedSectionId(null);
+      showToast(`已將「${template.name}」加入目前平面圖`);
+    },
+    [selectedEdgeId, setProject, showToast]
+  );
+
+  const handleApplyCabinetToElement = useCallback(
+    (elementId: string, draft: CustomCabinetTemplate) => {
+      setProject((prev) => ({
+        ...prev,
+        elements: prev.elements.map((el) =>
+          el.id === elementId
+            ? {
+                ...el,
+                kind: draft.baseKind,
+                name: draft.name,
+                widthCm: draft.widthCm,
+                depthCm: draft.depthCm,
+                heightCm: draft.heightCm,
+                elevationCm: draft.elevationCm,
+                ...(draft.color ? { color: draft.color } : {}),
+                cabinetSpec: sanitizeCabinetSpec(
+                  draft.cabinetSpec,
+                  draft.baseKind,
+                  draft.widthCm
+                ),
+                customCabinetId: draft.id,
+              }
+            : el
+        ),
+      }));
+      setCabinetDesignElementId(null);
+      setSelectedElementId(elementId);
+      showToast(`已套用「${draft.name}」櫃體規格至空間元件`);
+    },
+    [setProject, showToast]
+  );
+
+  const handleOpenCabinetDesigner = useCallback((editElement?: FloorplanElement | null) => {
+    setCabinetDesignElementId(editElement ? editElement.id : null);
+    setViewMode('cabinet');
+    setMobilePanel('canvas');
+  }, []);
+
   const handleExportPdf = useCallback(async () => {
     if (isExportingPdf) return;
     setIsExportingPdf(true);
@@ -849,6 +1021,7 @@ export default function App() {
       if (
         isReadOnly ||
         viewMode === 'quote' ||
+        viewMode === 'cabinet' ||
         shareModalOpen ||
         cloudModalOpen ||
         wallAreaModalOpen ||
@@ -1088,7 +1261,12 @@ export default function App() {
             <button
               type="button"
               onClick={() => {
-                if (viewMode === '3d' || viewMode === 'elevation' || viewMode === 'quote') {
+                if (
+                  viewMode === '3d' ||
+                  viewMode === 'elevation' ||
+                  viewMode === 'quote' ||
+                  viewMode === 'cabinet'
+                ) {
                   setViewMode('2d');
                   setTimeout(() => canvas2DRef.current?.exportPng(), 80);
                 } else {
@@ -1165,6 +1343,9 @@ export default function App() {
               onAnalyzeSamplePdf={handleAnalyzeSamplePdf}
               isAnalyzing={isAnalyzing}
               analyzeError={analyzeError}
+              customCabinets={customCabinets}
+              onAddCustomCabinet={handleInsertCustomCabinet}
+              onOpenCabinetDesigner={handleOpenCabinetDesigner}
             />
           )}
         </div>
@@ -1263,6 +1444,25 @@ export default function App() {
                       : ''}
                   </span>
                 </button>
+                {!isReadOnly && (
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={viewMode === 'cabinet'}
+                    onClick={() => setViewMode('cabinet')}
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                      viewMode === 'cabinet'
+                        ? 'bg-white text-amber-700 shadow-xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    <PackagePlus className="w-3.5 h-3.5" />
+                    <span>
+                      櫃體設計
+                      {customCabinets.length > 0 ? ` (${customCabinets.length})` : ''}
+                    </span>
+                  </button>
+                )}
               </div>
 
               {/* Undo / Redo History Controls */}
@@ -1352,6 +1552,7 @@ export default function App() {
                 onDoubleClickElement={isReadOnly ? undefined : setEditingElementId}
                 onDeleteElement={isReadOnly ? undefined : handleDeleteElement}
                 onToggleWallDistances={isReadOnly ? undefined : handleToggleWallDistances}
+                onToggleLight={isReadOnly ? undefined : handleToggleLight}
                 onCopyElement={isReadOnly ? undefined : handleCopyElement}
                 onCreateSectionLine={isReadOnly ? undefined : handleCreateSectionLine}
                 onUpdateSectionLine={isReadOnly ? undefined : handleUpdateSectionLine}
@@ -1403,6 +1604,7 @@ export default function App() {
                     onDoubleClickElement={isReadOnly ? undefined : setEditingElementId}
                     onDeleteElement={isReadOnly ? undefined : handleDeleteElement}
                     onToggleWallDistances={isReadOnly ? undefined : handleToggleWallDistances}
+                    onToggleLight={isReadOnly ? undefined : handleToggleLight}
                     onCopyElement={isReadOnly ? undefined : handleCopyElement}
                     onCreateSectionLine={isReadOnly ? undefined : handleCreateSectionLine}
                     onUpdateSectionLine={isReadOnly ? undefined : handleUpdateSectionLine}
@@ -1460,6 +1662,19 @@ export default function App() {
                 onChangeInteriorWallFaces={setInteriorWallFaces}
                 onUpdateQuoteItems={handleUpdateQuoteItems}
                 onNotify={showToast}
+              />
+            )}
+
+            {viewMode === 'cabinet' && (
+              <CabinetDesignerView
+                customCabinets={customCabinets}
+                editingElement={cabinetDesignElement}
+                readOnly={isReadOnly}
+                onSaveTemplate={handleSaveCustomCabinet}
+                onDeleteTemplate={handleDeleteCustomCabinet}
+                onInsertTemplate={handleInsertCustomCabinet}
+                onApplyToFloorplanElement={handleApplyCabinetToElement}
+                onClearEditingElement={() => setCabinetDesignElementId(null)}
               />
             )}
 

@@ -76,6 +76,14 @@ import {
   computeOpeningBadgePosition,
   computeWallDimensionLayout,
 } from './threeDimensionLayout';
+import {
+  buildFirstPersonColliders,
+  computeFirstPersonSpawn,
+  findNearestSpaceInteractable,
+  getForward2DFromYaw,
+  isLightingElementKind,
+  stepFirstPersonMovement,
+} from './firstPersonNavigation';
 
 test('snapAngleDeg snaps near-orthogonal and near-diagonal angles when enabled', () => {
   assert.deepEqual(snapAngleDeg(3, true, 8), { angleDeg: 0, snapped: true });
@@ -816,9 +824,9 @@ test('computeWallDragResult slides wall-anchored openings/fixtures and detaches 
   assert.deepEqual(unsnappedSlide, { mode: 'wall', offsetCm: 2 });
 });
 
-test('ELEMENT_CATEGORIES covers all 15 element kinds without duplicates', () => {
+test('ELEMENT_CATEGORIES covers all 19 element kinds without duplicates', () => {
   const allDefaultKinds = Object.keys(ELEMENT_KIND_DEFAULTS);
-  assert.equal(allDefaultKinds.length, 15);
+  assert.equal(allDefaultKinds.length, 19);
   const seen: string[] = [];
   for (const cat of ELEMENT_CATEGORIES) {
     assert.ok(cat.kinds.length > 0, `Empty category: ${cat.id}`);
@@ -1216,8 +1224,204 @@ test('quotationCalculator computes live ceiling/wall/floor areas, imports slidin
   assert.ok(txt.includes('含稅總計'));
 });
 
+test('lighting fixtures (panel, track, recessed, wall_sconce) support defaults, lighting layer, lightOn switch, SVG & shareLink', () => {
+  const lampKinds = ['panel_light', 'track_light', 'recessed_light', 'wall_sconce'] as const;
+  for (const kind of lampKinds) {
+    assert.equal(isLightingElementKind(kind), true);
+    assert.equal(ELEMENT_KIND_DEFAULTS[kind].category, 'lighting');
+    assert.equal(getDefaultLayerIdForKind(kind, DEFAULT_FLOORPLAN_LAYERS), 'layer-lighting');
+  }
+  assert.equal(isLightingElementKind('bed'), false);
 
+  const projectWithLamps = {
+    ...CARE_ROOM_PRESET,
+    elements: [
+      ...CARE_ROOM_PRESET.elements,
+      {
+        id: 'lamp-panel',
+        kind: 'panel_light' as const,
+        name: '平板燈',
+        placement: 'free' as const,
+        edgeId: 'c1',
+        offsetCm: 0,
+        xCm: 180,
+        yCm: 200,
+        widthCm: 60,
+        depthCm: 60,
+        heightCm: 4,
+        elevationCm: 246,
+        side: 'inside' as const,
+        lightOn: true,
+      },
+      {
+        id: 'lamp-sconce',
+        kind: 'wall_sconce' as const,
+        name: '壁燈',
+        placement: 'wall' as const,
+        edgeId: 'c1',
+        offsetCm: 140,
+        widthCm: 26,
+        depthCm: 14,
+        heightCm: 24,
+        elevationCm: 175,
+        side: 'inside' as const,
+        lightOn: false,
+      },
+    ],
+  };
 
+  const solved = solveFloorplan(projectWithLamps);
+  const placements = resolveElementPlacements(projectWithLamps.elements, solved);
+  const svgOn = buildFloorplan2DSvgString(projectWithLamps, solved, placements);
+  assert.ok(svgOn.includes('平板燈'));
+  assert.ok(svgOn.includes('壁燈'));
+  assert.ok(svgOn.includes('#fef9c3'), 'ON panel light renders warm fill in 2D SVG');
+  assert.ok(svgOn.includes('#f1f5f9'), 'OFF sconce renders muted fill in 2D SVG');
 
+  // Verify lightOn state is preserved by shareLink sanitization
+  const sanitized = sanitizeSharedProject(projectWithLamps);
+  assert.ok(sanitized);
+  const sanPanel = sanitized.elements.find((e) => e.id === 'lamp-panel');
+  const sanSconce = sanitized.elements.find((e) => e.id === 'lamp-sconce');
+  assert.equal(sanPanel?.lightOn, true);
+  assert.equal(sanSconce?.lightOn, false);
 
+  // Hiding layer-lighting removes lighting fixtures from visible placements
+  const hiddenLampsLayers = DEFAULT_FLOORPLAN_LAYERS.map((l) =>
+    l.id === 'layer-lighting' ? { ...l, visible: false } : l
+  );
+  const visible = applyLayersToPlacements(placements, hiddenLampsLayers);
+  assert.equal(visible.some((p) => isLightingElementKind(p.element.kind)), false);
+});
 
+test('firstPersonNavigation spawns at ~160cm, collides with walls & closed doors, passes open doors, and locates Space targets', () => {
+  const solved = solveFloorplan(ROOM_IN_ROOM_PRESET);
+  const placements = resolveElementPlacements(ROOM_IN_ROOM_PRESET.elements, solved);
+
+  // Closed colliders block walking straight through North outer wall (y=0) or subroom partition wall
+  const closedMap: Record<string, boolean> = {};
+  const collidersClosed = buildFirstPersonColliders(
+    solved,
+    placements,
+    ROOM_IN_ROOM_PRESET.wallThicknessCm,
+    closedMap
+  );
+
+  const spawn = computeFirstPersonSpawn(
+    solved,
+    collidersClosed,
+    ROOM_IN_ROOM_PRESET.ceilingHeightCm,
+    placements
+  );
+  assert.equal(spawn.eyeHeightCm, 160);
+  assert.ok(spawn.xCm > 25 && spawn.xCm < solved.bounds.maxX - 25);
+  assert.ok(spawn.yCm > 25 && spawn.yCm < solved.bounds.maxY - 25);
+
+  // Short ceiling (170 cm) clamps eye height safely below ceiling
+  const shortSpawn = computeFirstPersonSpawn(solved, collidersClosed, 170, placements);
+  assert.equal(shortSpawn.eyeHeightCm, 152);
+
+  // Walking straight North (yaw=0 -> forward=(0,-1)) toward outer North wall (y=0) stops outside wall + player radius
+  let pos = { x: 100, y: 60 };
+  for (let i = 0; i < 30; i++) {
+    pos = stepFirstPersonMovement({
+      xCm: pos.x,
+      yCm: pos.y,
+      yawRad: 0,
+      forwardInput: 1,
+      rightInput: 0,
+      dtSec: 0.05,
+      colliders: collidersClosed,
+    });
+  }
+  assert.ok(pos.y >= 20, `Player should be stopped by North wall (y=${pos.y})`);
+
+  // Walking into the closed subroom door along iw2 (y=160, x=214..372.5, subroom door x ~234..324) stops on main-room side
+  let doorPos = { x: 279, y: 210 };
+  for (let i = 0; i < 30; i++) {
+    doorPos = stepFirstPersonMovement({
+      xCm: doorPos.x,
+      yCm: doorPos.y,
+      yawRad: 0,
+      forwardInput: 1,
+      rightInput: 0,
+      dtSec: 0.05,
+      colliders: collidersClosed,
+    });
+  }
+  assert.ok(doorPos.y > 165, `Closed door should block passage across iw2 (y=${doorPos.y})`);
+
+  // Nearest interactable from (279, 210) facing North is the subroom door
+  const fwd = getForward2DFromYaw(0);
+  const subDoorTarget = findNearestSpaceInteractable(doorPos.x, doorPos.y, fwd.x, fwd.y, placements, 240);
+  assert.ok(subDoorTarget);
+  assert.equal(subDoorTarget.kind, 'door');
+
+  // Once that door is opened via Space, rebuilding colliders carves the doorway and player walks smoothly into subroom (y < 140)
+  const openedMap: Record<string, boolean> = { [subDoorTarget.id]: true };
+  const collidersOpen = buildFirstPersonColliders(
+    solved,
+    placements,
+    ROOM_IN_ROOM_PRESET.wallThicknessCm,
+    openedMap
+  );
+  let openWalkPos = { ...doorPos };
+  for (let i = 0; i < 30; i++) {
+    openWalkPos = stepFirstPersonMovement({
+      xCm: openWalkPos.x,
+      yCm: openWalkPos.y,
+      yawRad: 0,
+      forwardInput: 1,
+      rightInput: 0,
+      dtSec: 0.05,
+      colliders: collidersOpen,
+    });
+  }
+  assert.ok(openWalkPos.y < 130, `Open door should allow walking into subroom (y=${openWalkPos.y})`);
+
+  // Verify Spacebar also detects L-shaped bed_curtain
+  const projectWithCurtain = {
+    ...CARE_ROOM_PRESET,
+    elements: [
+      ...CARE_ROOM_PRESET.elements,
+      {
+        id: 'curtain-test',
+        kind: 'bed_curtain' as const,
+        name: '病床隔簾(L型)',
+        placement: 'free' as const,
+        edgeId: 'c1',
+        offsetCm: 0,
+        xCm: 150,
+        yCm: 150,
+        widthCm: 150,
+        depthCm: 230,
+        heightCm: 205,
+        elevationCm: 40,
+        side: 'inside' as const,
+      },
+    ],
+  };
+  const careSolved = solveFloorplan(projectWithCurtain);
+  const carePlacements = resolveElementPlacements(projectWithCurtain.elements, careSolved);
+  const curtainPl = carePlacements.find((p) => p.element.kind === 'bed_curtain')!;
+  assert.ok(curtainPl);
+  const nearCurtain = findNearestSpaceInteractable(
+    curtainPl.boxCenter.x,
+    curtainPl.boxCenter.y,
+    0,
+    1,
+    carePlacements,
+    240
+  );
+  assert.ok(nearCurtain);
+  assert.equal(nearCurtain.id, curtainPl.element.id);
+  assert.equal(nearCurtain.kind, 'bed_curtain');
+
+  // Verify A/D yaw rotation turns facing direction cleanly (left +yaw faces -X, right -yaw faces +X)
+  const leftYaw = Math.PI / 2;
+  const fwdLeft = getForward2DFromYaw(leftYaw);
+  assert.ok(fwdLeft.x < -0.99 && Math.abs(fwdLeft.y) < 1e-6);
+  const rightYaw = -Math.PI / 2;
+  const fwdRight = getForward2DFromYaw(rightYaw);
+  assert.ok(fwdRight.x > 0.99 && Math.abs(fwdRight.y) < 1e-6);
+});
